@@ -851,6 +851,26 @@ LightmapGI::BakeError LightmapGI::_save_and_reimport_atlas_textures(const Ref<Li
 
 	for (int i = 0; i < texture_count; i++) {
 		const int texture_slice_count = (i == texture_count - 1 && last_count != 0) ? last_count : slices_per_texture;
+		// Native batch callers have no EditorFileSystem import callback.
+		if (ResourceLoader::import == nullptr) {
+			Vector<Ref<Image>> layer_images;
+			for (int j = 0; j < texture_slice_count; j++) {
+				Ref<Image> layer = images[i * slices_per_texture + j];
+				if (supersampling_enabled) {
+					layer = layer->duplicate();
+					layer->resize(layer->get_width() / supersampling_factor, layer->get_height() / supersampling_factor, Image::INTERPOLATE_TRILINEAR);
+				}
+				layer_images.push_back(layer);
+			}
+			Ref<Texture2DArray> texture;
+			texture.instantiate();
+			ERR_FAIL_COND_V(texture->create_from_images(layer_images) != OK, BAKE_ERROR_CANT_CREATE_IMAGE);
+			const String native_path = p_base_name + (texture_count > 1 ? "_" + itos(i) : "") + ".res";
+			ERR_FAIL_COND_V(ResourceSaver::save(texture, native_path, ResourceSaver::FLAG_COMPRESS) != OK, BAKE_ERROR_CANT_CREATE_IMAGE);
+			texture->set_path(native_path);
+			r_textures[i] = texture;
+			continue;
+		}
 
 		Ref<Image> texture_image = Image::create_empty(slice_width, slice_height * texture_slice_count, false, images[0]->get_format());
 
@@ -1057,7 +1077,30 @@ void LightmapGI::_build_area_light_texture_atlas(const Vector<LightmapGI::Lights
 	}
 }
 
-LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_path, Lightmapper::BakeStepFunc p_bake_step, void *p_bake_userdata) {
+LightmapGI::BakeError LightmapGI::bake_from_scene(Node *p_from_node, const String &p_image_data_path) {
+	return _bake_from_scene(p_from_node, p_image_data_path, false);
+}
+
+LightmapGI::BakeError LightmapGI::bake_probes_from_scene(Node *p_from_node, const String &p_image_data_path) {
+	return _bake_from_scene(p_from_node, p_image_data_path, true);
+}
+
+LightmapGI::BakeError LightmapGI::bake_probe_field_from_scene(Node *p_from_node, const String &p_image_data_path) {
+	return _bake_from_scene(p_from_node, p_image_data_path, true, true);
+}
+
+LightmapGI::BakeError LightmapGI::_bake_from_scene(Node *p_from_node, const String &p_image_data_path, bool p_probes_only, bool p_probe_field_only) {
+	return bake(p_from_node, p_image_data_path, [](float p_completion, const String &p_text, void *, bool) {
+		print_line(vformat("LIGHTMAP_NATIVE_BAKE %0.1f%% %s", p_completion * 100.0f, p_text));
+		return false;
+	}, nullptr, p_probes_only, p_probe_field_only);
+}
+
+LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_path, Lightmapper::BakeStepFunc p_bake_step, void *p_bake_userdata, bool p_probes_only, bool p_probe_field_only) {
+	ERR_FAIL_COND_V_MSG(p_probe_field_only && !p_probes_only, BAKE_ERROR_MESHES_INVALID, "SH_PROBE_FIELD_REQUIRES_PROBE_ONLY");
+	ERR_FAIL_COND_V_MSG(p_probes_only && p_image_data_path.is_empty(), BAKE_ERROR_NO_SAVE_PATH, "SH_PROBE_ONLY_PATH_REQUIRED: explicit output resource path required");
+	ERR_FAIL_COND_V_MSG(p_probe_field_only && p_image_data_path.get_extension().to_lower() != "res", BAKE_ERROR_CANT_CREATE_IMAGE, "SH_PROBE_FIELD_RES_REQUIRED: use a .res output path");
+	ERR_FAIL_COND_V_MSG(p_probes_only && use_texture_for_bounces, BAKE_ERROR_MESHES_INVALID, "SH_PROBE_ONLY_REQUIRES_RAY_BOUNCES: use_texture_for_bounces must be false");
 	if (p_image_data_path.is_empty()) {
 		if (get_light_data().is_null()) {
 			return BAKE_ERROR_NO_SAVE_PATH;
@@ -1476,7 +1519,7 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 
 	Lightmapper::BakeError bake_err = lightmapper->bake(Lightmapper::BakeQuality(bake_quality), use_denoiser, denoiser_strength, denoiser_range, bounces,
 			bounce_indirect_energy, bias, max_texture_size, directional, shadowmask_mode != LightmapGIData::SHADOWMASK_MODE_NONE, use_texture_for_bounces,
-			Lightmapper::GenerateProbes(gen_probes), environment_image, environment_transform, _lightmap_bake_step_function, &bsud, exposure_normalization, (supersampling_enabled ? supersampling_factor : 1));
+			Lightmapper::GenerateProbes(gen_probes), environment_image, environment_transform, _lightmap_bake_step_function, &bsud, exposure_normalization, (supersampling_enabled ? supersampling_factor : 1), p_probes_only);
 
 	if (bake_err == Lightmapper::BAKE_ERROR_TEXTURE_EXCEEDS_MAX_SIZE) {
 		return BAKE_ERROR_TEXTURE_SIZE_TOO_SMALL;
@@ -1497,7 +1540,7 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 	const bool save_shadowmask = shadowmask_mode != LightmapGIData::SHADOWMASK_MODE_NONE && shadowmask_texture_count > 0;
 
 	// Save the lightmap atlases.
-	BakeError save_err = _save_and_reimport_atlas_textures(lightmapper, texture_filename, lightmap_textures, false);
+	BakeError save_err = p_probes_only ? BAKE_ERROR_OK : _save_and_reimport_atlas_textures(lightmapper, texture_filename, lightmap_textures, false);
 	ERR_FAIL_COND_V(save_err != BAKE_ERROR_OK, save_err);
 
 	if (save_shadowmask) {
@@ -1509,7 +1552,15 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 	// POSTBAKE: Save Light Data.
 	Ref<LightmapGIData> gi_data;
 
-	if (get_light_data().is_valid()) {
+	if (p_probes_only) {
+		gi_data.instantiate();
+		// A failed save must not change the node's existing capture. Field
+		// export does not use capture topology at all.
+		if (!p_probe_field_only && get_light_data().is_valid()) {
+			Ref<LightmapGIData> previous = get_light_data();
+			gi_data->set_capture_data(previous->get_capture_bounds(), previous->is_interior(), previous->get_capture_points(), previous->get_capture_sh(), previous->get_capture_tetrahedra(), previous->get_capture_bsp_tree(), previous->get_baked_exposure(), previous->get_lightprobe_hash());
+		}
+	} else if (get_light_data().is_valid()) {
 		gi_data = get_light_data();
 		set_light_data(Ref<LightmapGIData>()); // Clear.
 		gi_data->clear();
@@ -1529,7 +1580,7 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 	gi_data->set_uses_spherical_harmonics(directional);
 	gi_data->_set_uses_packed_directional(directional); // New SH lightmaps are packed automatically.
 
-	for (int i = 0; i < lightmapper->get_bake_mesh_count(); i++) {
+	for (int i = 0; !p_probes_only && i < lightmapper->get_bake_mesh_count(); i++) {
 		Dictionary d = lightmapper->get_bake_mesh_userdata(i);
 		NodePath np = d["path"];
 		int32_t subindex = -1;
@@ -1564,6 +1615,24 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 		for (int j = 0; j < 9; j++) {
 			probe_sh[i * 9 + j] = colors[j];
 		}
+	}
+
+	if (p_probe_field_only) {
+		Dictionary data;
+		data["points"] = Vector<Vector3>(probe_points);
+		data["sh"] = Vector<Color>(probe_sh);
+		data["bounds"] = bounds;
+		data["interior"] = interior;
+		data["baked_exposure"] = exposure_normalization;
+		Ref<Resource> field;
+		field.instantiate();
+		field->set_meta("schema", "sh_probe_field_v1");
+		field->set_meta("probe_data", data);
+		if (ResourceSaver::save(field, p_image_data_path) != OK) {
+			return BAKE_ERROR_CANT_CREATE_IMAGE;
+		}
+		print_line(vformat("SH_PROBE_FIELD_SAVED probes=%d topology=none", probe_count));
+		return BAKE_ERROR_OK;
 	}
 
 	// If the probe hash doesn't match, build the BSP tree from scratch.
@@ -2119,7 +2188,9 @@ void LightmapGI::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_camera_attributes", "camera_attributes"), &LightmapGI::set_camera_attributes);
 	ClassDB::bind_method(D_METHOD("get_camera_attributes"), &LightmapGI::get_camera_attributes);
 
-	//	ClassDB::bind_method(D_METHOD("bake", "from_node"), &LightmapGI::bake, DEFVAL(Variant()));
+	ClassDB::bind_method(D_METHOD("bake_from_scene", "from_node", "image_data_path"), &LightmapGI::bake_from_scene);
+	ClassDB::bind_method(D_METHOD("bake_probes_from_scene", "from_node", "image_data_path"), &LightmapGI::bake_probes_from_scene);
+	ClassDB::bind_method(D_METHOD("bake_probe_field_from_scene", "from_node", "image_data_path"), &LightmapGI::bake_probe_field_from_scene);
 
 	ADD_GROUP("Tweaks", "");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "quality", PROPERTY_HINT_ENUM, "Low,Medium,High,Ultra"), "set_bake_quality", "get_bake_quality");

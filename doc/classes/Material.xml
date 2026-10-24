@@ -12,6 +12,12 @@
 		<link title="Third Person Shooter (TPS) Demo">https://godotengine.org/asset-library/asset/2710</link>
 	</tutorials>
 	<methods>
+		<method name="get_shader_rid" qualifiers="const">
+			<return type="RID" />
+			<description>
+				Returns the renderer shader for this material, preparing the native shader when needed. Offline material compilers can obtain its source and parameters without an editor visualizer.
+			</description>
+		</method>
 		<method name="_can_do_next_pass" qualifiers="virtual const">
 			<return type="bool" />
 			<description>

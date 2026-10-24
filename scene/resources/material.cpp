@@ -158,6 +158,7 @@ Ref<Resource> Material::create_placeholder() const {
 }
 
 void Material::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("get_shader_rid"), &Material::get_shader_rid);
 	ClassDB::bind_method(D_METHOD("set_next_pass", "next_pass"), &Material::set_next_pass);
 	ClassDB::bind_method(D_METHOD("get_next_pass"), &Material::get_next_pass);
 

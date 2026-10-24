@@ -1101,11 +1101,15 @@ LightmapperRD::BakeError LightmapperRD::_denoise(RenderingDevice *p_rd, Ref<RDSh
 	return BAKE_OK;
 }
 
-LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_denoiser, float p_denoiser_strength, int p_denoiser_range, int p_bounces, float p_bounce_indirect_energy, float p_bias, int p_max_texture_size, bool p_bake_sh, bool p_bake_shadowmask, bool p_texture_for_bounces, GenerateProbes p_generate_probes, const Ref<Image> &p_environment_panorama, const Basis &p_environment_transform, BakeStepFunc p_step_function, void *p_bake_userdata, float p_exposure_normalization, float p_supersampling_factor) {
+LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_denoiser, float p_denoiser_strength, int p_denoiser_range, int p_bounces, float p_bounce_indirect_energy, float p_bias, int p_max_texture_size, bool p_bake_sh, bool p_bake_shadowmask, bool p_texture_for_bounces, GenerateProbes p_generate_probes, const Ref<Image> &p_environment_panorama, const Basis &p_environment_transform, BakeStepFunc p_step_function, void *p_bake_userdata, float p_exposure_normalization, float p_supersampling_factor, bool p_probes_only) {
 	int denoiser = GLOBAL_GET("rendering/lightmapping/denoising/denoiser");
-	String oidn_path = EDITOR_GET("filesystem/tools/oidn/oidn_denoise_path");
+	String oidn_path;
 
-	if (p_use_denoiser && denoiser == 1) {
+	if (!p_probes_only && p_use_denoiser && denoiser == 1) {
+		// Native batch callers do not initialize EditorSettings.
+		if (EditorSettings::get_singleton()) {
+			oidn_path = EDITOR_GET("filesystem/tools/oidn/oidn_denoise_path");
+		}
 		// OIDN (external).
 		Ref<DirAccess> da = DirAccess::create(DirAccess::ACCESS_FILESYSTEM);
 
@@ -1262,6 +1266,13 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 
 		emission_array_tex = rd->texture_create(tf, RD::TextureView(), emission_data);
 
+		// Probe integration samples the atlas inputs, not surface-lightmap scratch.
+		if (p_probes_only) {
+			tf.width = 1;
+			tf.height = 1;
+			tf.array_layers = 1;
+		}
+
 		//this will be rastered to
 		tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_STORAGE_BIT;
 		normal_tex = rd->texture_create(tf, RD::TextureView());
@@ -1276,19 +1287,19 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 			tf.format = RD::DATA_FORMAT_R8G8B8A8_UNORM;
 
 			shadowmask_tex = rd->texture_create(tf, RD::TextureView());
-			rd->texture_clear(shadowmask_tex, Color(0, 0, 0, 0), 0, 1, 0, atlas_slices);
+			rd->texture_clear(shadowmask_tex, Color(0, 0, 0, 0), 0, 1, 0, tf.array_layers);
 
 			shadowmask_tex2 = rd->texture_create(tf, RD::TextureView());
-			rd->texture_clear(shadowmask_tex2, Color(0, 0, 0, 0), 0, 1, 0, atlas_slices);
+			rd->texture_clear(shadowmask_tex2, Color(0, 0, 0, 0), 0, 1, 0, tf.array_layers);
 		}
 
 		// lightmap
 		tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
 
 		light_source_tex = rd->texture_create(tf, RD::TextureView());
-		rd->texture_clear(light_source_tex, Color(0, 0, 0, 0), 0, 1, 0, atlas_slices);
+		rd->texture_clear(light_source_tex, Color(0, 0, 0, 0), 0, 1, 0, tf.array_layers);
 
-		if (p_bake_sh) {
+		if (p_bake_sh && !p_probes_only) {
 			tf.array_layers *= 4;
 		}
 		light_accum_tex = rd->texture_create(tf, RD::TextureView());
@@ -1594,8 +1605,8 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	RID raster_depth_buffer;
 	{
 		RD::TextureFormat tf;
-		tf.width = atlas_size.width;
-		tf.height = atlas_size.height;
+		tf.width = p_probes_only ? 1 : atlas_size.width;
+		tf.height = p_probes_only ? 1 : atlas_size.height;
 		tf.depth = 1;
 		tf.texture_type = RD::TEXTURE_TYPE_2D;
 		tf.usage_bits = RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
@@ -1610,7 +1621,9 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 
 	/* STEP 3: Raster the geometry to UV2 coords in the atlas textures GPU*/
 
-	_raster_geometry(rd, atlas_size, atlas_slices, grid_size, bounds, p_bias, slice_triangle_count, position_tex, unocclude_tex, normal_tex, raster_depth_buffer, rasterize_shader, raster_base_uniform);
+	if (!p_probes_only) {
+		_raster_geometry(rd, atlas_size, atlas_slices, grid_size, bounds, p_bias, slice_triangle_count, position_tex, unocclude_tex, normal_tex, raster_depth_buffer, rasterize_shader, raster_base_uniform);
+	}
 
 #ifdef DEBUG_TEXTURES
 
@@ -1697,293 +1710,12 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	rd->submit();
 	rd->sync();
 
-	if (p_step_function) {
-		if (p_step_function(0.49, RTR("Un-occluding geometry"), p_bake_userdata, true)) {
-			FREE_TEXTURES
-			FREE_BUFFERS
-			FREE_RASTER_RESOURCES
-			FREE_COMPUTE_RESOURCES
-			memdelete(rd);
-			if (rcd != nullptr) {
-				memdelete(rcd);
-			}
-			return BAKE_ERROR_USER_ABORTED;
-		}
-	}
-
 	PushConstant push_constant;
 	push_constant.denoiser_range = p_use_denoiser ? p_denoiser_range : 1.0;
 
-	/* UNOCCLUDE */
-	{
-		Vector<RD::Uniform> uniforms;
-		{
-			{
-				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
-				u.binding = 0;
-				u.append_id(position_tex);
-				uniforms.push_back(u);
-			}
-			{
-				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
-				u.binding = 1;
-				u.append_id(unocclude_tex);
-				uniforms.push_back(u);
-			}
-		}
-
-		RID unocclude_uniform_set = rd->uniform_set_create(uniforms, compute_shader_unocclude, 1);
-
-		RD::ComputeListID compute_list = rd->compute_list_begin();
-		rd->compute_list_bind_compute_pipeline(compute_list, compute_shader_unocclude_pipeline);
-		rd->compute_list_bind_uniform_set(compute_list, compute_base_uniform_set, 0);
-		rd->compute_list_bind_uniform_set(compute_list, unocclude_uniform_set, 1);
-
-		for (int i = 0; i < atlas_slices; i++) {
-			push_constant.atlas_slice = i;
-			rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(PushConstant));
-			rd->compute_list_dispatch(compute_list, group_size.x, group_size.y, group_size.z);
-			//no barrier, let them run all together
-		}
-		rd->compute_list_end(); //done
-	}
-
-#ifdef DEBUG_TEXTURES
-	for (int i = 0; i < atlas_slices; i++) {
-		Vector<uint8_t> s = rd->texture_get_data(unocclude_tex, i);
-		Ref<Image> img = Image::create_from_data(atlas_size.width, atlas_size.height, false, Image::FORMAT_RGBAF, s);
-		img->save_exr("res://1_unocclude_" + itos(i) + ".exr", false);
-	}
-#endif
-
-	if (p_step_function) {
-		if (p_step_function(0.5, RTR("Plot direct lighting"), p_bake_userdata, true)) {
-			FREE_TEXTURES
-			FREE_BUFFERS
-			FREE_RASTER_RESOURCES
-			FREE_COMPUTE_RESOURCES
-			memdelete(rd);
-			if (rcd != nullptr) {
-				memdelete(rcd);
-			}
-			return BAKE_ERROR_USER_ABORTED;
-		}
-	}
-
-	const int max_region_size = Math::nearest_power_of_2_templated(int(GLOBAL_GET("rendering/lightmapping/bake_performance/region_size")));
-	const int x_regions = Math::division_round_up(atlas_size.width, max_region_size);
-	const int y_regions = Math::division_round_up(atlas_size.height, max_region_size);
-
-	// Set ray count to the quality used for direct light and bounces.
-	switch (p_quality) {
-		case BAKE_QUALITY_LOW: {
-			push_constant.ray_count = GLOBAL_GET("rendering/lightmapping/bake_quality/low_quality_ray_count");
-		} break;
-		case BAKE_QUALITY_MEDIUM: {
-			push_constant.ray_count = GLOBAL_GET("rendering/lightmapping/bake_quality/medium_quality_ray_count");
-		} break;
-		case BAKE_QUALITY_HIGH: {
-			push_constant.ray_count = GLOBAL_GET("rendering/lightmapping/bake_quality/high_quality_ray_count");
-		} break;
-		case BAKE_QUALITY_ULTRA: {
-			push_constant.ray_count = GLOBAL_GET("rendering/lightmapping/bake_quality/ultra_quality_ray_count");
-		} break;
-	}
-
-	push_constant.ray_count = CLAMP(push_constant.ray_count, 16u, 8192u);
-
-	/* PRIMARY (direct) LIGHT PASS */
-	{
-		Vector<RD::Uniform> uniforms;
-		{
-			{
-				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
-				u.binding = 0;
-				u.append_id(light_source_tex);
-				uniforms.push_back(u);
-			}
-			{
-				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-				u.binding = 1;
-				u.append_id(light_dest_tex); //will be unused
-				uniforms.push_back(u);
-			}
-			{
-				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-				u.binding = 2;
-				u.append_id(position_tex);
-				uniforms.push_back(u);
-			}
-			{
-				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-				u.binding = 3;
-				u.append_id(normal_tex);
-				uniforms.push_back(u);
-			}
-			{
-				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
-				u.binding = 4;
-				u.append_id(light_accum_tex);
-				uniforms.push_back(u);
-			}
-
-			if (p_bake_shadowmask) {
-				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
-				u.binding = 5;
-				u.append_id(shadowmask_tex);
-				uniforms.push_back(u);
-			}
-
-			{
-				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-				u.binding = 6;
-				u.append_id(area_light_atlas_tex);
-				uniforms.push_back(u);
-			}
-		}
-
-		RID light_uniform_set = rd->uniform_set_create(uniforms, compute_shader_primary, 1);
-
-		int count = 0;
-		for (int s = 0; s < atlas_slices; s++) {
-			push_constant.atlas_slice = s;
-
-			for (int i = 0; i < x_regions; i++) {
-				for (int j = 0; j < y_regions; j++) {
-					int x = i * max_region_size;
-					int y = j * max_region_size;
-					int w = MIN((i + 1) * max_region_size, atlas_size.width) - x;
-					int h = MIN((j + 1) * max_region_size, atlas_size.height) - y;
-
-					push_constant.region_ofs[0] = x;
-					push_constant.region_ofs[1] = y;
-
-					group_size = Vector3i(Math::division_round_up(w, 8), Math::division_round_up(h, 8), 1);
-					RD::ComputeListID compute_list = rd->compute_list_begin();
-					rd->compute_list_bind_compute_pipeline(compute_list, compute_shader_primary_pipeline);
-					rd->compute_list_bind_uniform_set(compute_list, compute_base_uniform_set, 0);
-					rd->compute_list_bind_uniform_set(compute_list, light_uniform_set, 1);
-					rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(PushConstant));
-					rd->compute_list_dispatch(compute_list, group_size.x, group_size.y, group_size.z);
-					rd->compute_list_end();
-
-					rd->submit();
-					rd->sync();
-
-					count++;
-					if (p_step_function) {
-						int total = (atlas_slices * x_regions * y_regions);
-						int percent = count * 100 / total;
-						float p = float(count) / total * 0.1;
-						if (p_step_function(0.5 + p, vformat(RTR("Plot direct lighting %d%%"), percent), p_bake_userdata, false)) {
-							FREE_TEXTURES
-							FREE_BUFFERS
-							FREE_RASTER_RESOURCES
-							FREE_COMPUTE_RESOURCES
-							memdelete(rd);
-							if (rcd != nullptr) {
-								memdelete(rcd);
-							}
-							return BAKE_ERROR_USER_ABORTED;
-						}
-					}
-				}
-			}
-		}
-	}
-
-#ifdef DEBUG_TEXTURES
-
-	for (int i = 0; i < atlas_slices; i++) {
-		Vector<uint8_t> s = rd->texture_get_data(light_source_tex, i);
-		Ref<Image> img = Image::create_from_data(atlas_size.width, atlas_size.height, false, Image::FORMAT_RGBAH, s);
-		img->save_exr("res://2_light_primary_" + itos(i) + ".exr", false);
-	}
-
-	if (p_bake_sh) {
-		for (int i = 0; i < atlas_slices * 4; i++) {
-			Vector<uint8_t> s = rd->texture_get_data(light_accum_tex, i);
-			Ref<Image> img = Image::create_from_data(atlas_size.width, atlas_size.height, false, Image::FORMAT_RGBAH, s);
-			img->save_exr("res://2_light_primary_accum_" + itos(i) + ".exr", false);
-		}
-	}
-#endif
-
-	/* SECONDARY (indirect) LIGHT PASS(ES) */
-
-	if (p_bounces > 0) {
-		Vector<RD::Uniform> uniforms;
-		{
-			{
-				// Unused.
-				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
-				u.binding = 0;
-				u.append_id(light_dest_tex);
-				uniforms.push_back(u);
-			}
-			{
-				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-				u.binding = 1;
-				u.append_id(light_source_tex);
-				uniforms.push_back(u);
-			}
-			{
-				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-				u.binding = 2;
-				u.append_id(position_tex);
-				uniforms.push_back(u);
-			}
-			{
-				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-				u.binding = 3;
-				u.append_id(normal_tex);
-				uniforms.push_back(u);
-			}
-			{
-				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
-				u.binding = 4;
-				u.append_id(light_accum_tex);
-				uniforms.push_back(u);
-			}
-			{
-				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-				u.binding = 5;
-				u.append_id(light_environment_tex);
-				uniforms.push_back(u);
-			}
-
-			{
-				RD::Uniform u;
-				u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-				u.binding = 6;
-				u.append_id(area_light_atlas_tex);
-				uniforms.push_back(u);
-			}
-		}
-
-		RID secondary_uniform_set;
-		secondary_uniform_set = rd->uniform_set_create(uniforms, compute_shader_secondary, 1);
-
-		const int max_rays = GLOBAL_GET("rendering/lightmapping/bake_performance/max_rays_per_pass");
-		int ray_iterations = Math::division_round_up((int32_t)push_constant.ray_count, max_rays);
-
+	if (!p_probes_only) {
 		if (p_step_function) {
-			if (p_step_function(0.6, RTR("Integrate indirect lighting"), p_bake_userdata, true)) {
+			if (p_step_function(0.49, RTR("Un-occluding geometry"), p_bake_userdata, true)) {
 				FREE_TEXTURES
 				FREE_BUFFERS
 				FREE_RASTER_RESOURCES
@@ -1996,43 +1728,177 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 			}
 		}
 
-		int count = 0;
-		for (int s = 0; s < atlas_slices; s++) {
-			push_constant.atlas_slice = s;
+		/* UNOCCLUDE */
+		{
+			Vector<RD::Uniform> uniforms;
+			{
+				{
+					RD::Uniform u;
+					u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+					u.binding = 0;
+					u.append_id(position_tex);
+					uniforms.push_back(u);
+				}
+				{
+					RD::Uniform u;
+					u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+					u.binding = 1;
+					u.append_id(unocclude_tex);
+					uniforms.push_back(u);
+				}
+			}
 
-			for (int i = 0; i < x_regions; i++) {
-				for (int j = 0; j < y_regions; j++) {
-					int x = i * max_region_size;
-					int y = j * max_region_size;
-					int w = MIN((i + 1) * max_region_size, atlas_size.width) - x;
-					int h = MIN((j + 1) * max_region_size, atlas_size.height) - y;
+			RID unocclude_uniform_set = rd->uniform_set_create(uniforms, compute_shader_unocclude, 1);
 
-					push_constant.region_ofs[0] = x;
-					push_constant.region_ofs[1] = y;
+			RD::ComputeListID compute_list = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(compute_list, compute_shader_unocclude_pipeline);
+			rd->compute_list_bind_uniform_set(compute_list, compute_base_uniform_set, 0);
+			rd->compute_list_bind_uniform_set(compute_list, unocclude_uniform_set, 1);
 
-					group_size = Vector3i(Math::division_round_up(w, 8), Math::division_round_up(h, 8), 1);
+			for (int i = 0; i < atlas_slices; i++) {
+				push_constant.atlas_slice = i;
+				rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(PushConstant));
+				rd->compute_list_dispatch(compute_list, group_size.x, group_size.y, group_size.z);
+				//no barrier, let them run all together
+			}
+			rd->compute_list_end(); //done
+		}
 
-					for (int k = 0; k < ray_iterations; k++) {
+#ifdef DEBUG_TEXTURES
+		for (int i = 0; i < atlas_slices; i++) {
+			Vector<uint8_t> s = rd->texture_get_data(unocclude_tex, i);
+			Ref<Image> img = Image::create_from_data(atlas_size.width, atlas_size.height, false, Image::FORMAT_RGBAF, s);
+			img->save_exr("res://1_unocclude_" + itos(i) + ".exr", false);
+		}
+#endif
+
+		if (p_step_function) {
+			if (p_step_function(0.5, RTR("Plot direct lighting"), p_bake_userdata, true)) {
+				FREE_TEXTURES
+				FREE_BUFFERS
+				FREE_RASTER_RESOURCES
+				FREE_COMPUTE_RESOURCES
+				memdelete(rd);
+				if (rcd != nullptr) {
+					memdelete(rcd);
+				}
+				return BAKE_ERROR_USER_ABORTED;
+			}
+		}
+
+		const int max_region_size = Math::nearest_power_of_2_templated(int(GLOBAL_GET("rendering/lightmapping/bake_performance/region_size")));
+		const int x_regions = Math::division_round_up(atlas_size.width, max_region_size);
+		const int y_regions = Math::division_round_up(atlas_size.height, max_region_size);
+
+		// Set ray count to the quality used for direct light and bounces.
+		switch (p_quality) {
+			case BAKE_QUALITY_LOW: {
+				push_constant.ray_count = GLOBAL_GET("rendering/lightmapping/bake_quality/low_quality_ray_count");
+			} break;
+			case BAKE_QUALITY_MEDIUM: {
+				push_constant.ray_count = GLOBAL_GET("rendering/lightmapping/bake_quality/medium_quality_ray_count");
+			} break;
+			case BAKE_QUALITY_HIGH: {
+				push_constant.ray_count = GLOBAL_GET("rendering/lightmapping/bake_quality/high_quality_ray_count");
+			} break;
+			case BAKE_QUALITY_ULTRA: {
+				push_constant.ray_count = GLOBAL_GET("rendering/lightmapping/bake_quality/ultra_quality_ray_count");
+			} break;
+		}
+
+		push_constant.ray_count = CLAMP(push_constant.ray_count, 16u, 8192u);
+
+		/* PRIMARY (direct) LIGHT PASS */
+		{
+			Vector<RD::Uniform> uniforms;
+			{
+				{
+					RD::Uniform u;
+					u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+					u.binding = 0;
+					u.append_id(light_source_tex);
+					uniforms.push_back(u);
+				}
+				{
+					RD::Uniform u;
+					u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+					u.binding = 1;
+					u.append_id(light_dest_tex); //will be unused
+					uniforms.push_back(u);
+				}
+				{
+					RD::Uniform u;
+					u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+					u.binding = 2;
+					u.append_id(position_tex);
+					uniforms.push_back(u);
+				}
+				{
+					RD::Uniform u;
+					u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+					u.binding = 3;
+					u.append_id(normal_tex);
+					uniforms.push_back(u);
+				}
+				{
+					RD::Uniform u;
+					u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+					u.binding = 4;
+					u.append_id(light_accum_tex);
+					uniforms.push_back(u);
+				}
+
+				if (p_bake_shadowmask) {
+					RD::Uniform u;
+					u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+					u.binding = 5;
+					u.append_id(shadowmask_tex);
+					uniforms.push_back(u);
+				}
+
+				{
+					RD::Uniform u;
+					u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+					u.binding = 6;
+					u.append_id(area_light_atlas_tex);
+					uniforms.push_back(u);
+				}
+			}
+
+			RID light_uniform_set = rd->uniform_set_create(uniforms, compute_shader_primary, 1);
+
+			int count = 0;
+			for (int s = 0; s < atlas_slices; s++) {
+				push_constant.atlas_slice = s;
+
+				for (int i = 0; i < x_regions; i++) {
+					for (int j = 0; j < y_regions; j++) {
+						int x = i * max_region_size;
+						int y = j * max_region_size;
+						int w = MIN((i + 1) * max_region_size, atlas_size.width) - x;
+						int h = MIN((j + 1) * max_region_size, atlas_size.height) - y;
+
+						push_constant.region_ofs[0] = x;
+						push_constant.region_ofs[1] = y;
+
+						group_size = Vector3i(Math::division_round_up(w, 8), Math::division_round_up(h, 8), 1);
 						RD::ComputeListID compute_list = rd->compute_list_begin();
-						rd->compute_list_bind_compute_pipeline(compute_list, compute_shader_secondary_pipeline);
+						rd->compute_list_bind_compute_pipeline(compute_list, compute_shader_primary_pipeline);
 						rd->compute_list_bind_uniform_set(compute_list, compute_base_uniform_set, 0);
-						rd->compute_list_bind_uniform_set(compute_list, secondary_uniform_set, 1);
-
-						push_constant.ray_from = k * max_rays;
-						push_constant.ray_to = MIN((k + 1) * max_rays, int32_t(push_constant.ray_count));
+						rd->compute_list_bind_uniform_set(compute_list, light_uniform_set, 1);
 						rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(PushConstant));
 						rd->compute_list_dispatch(compute_list, group_size.x, group_size.y, group_size.z);
-
 						rd->compute_list_end();
+
 						rd->submit();
 						rd->sync();
 
 						count++;
 						if (p_step_function) {
-							int total = (atlas_slices * x_regions * y_regions * ray_iterations);
+							int total = (atlas_slices * x_regions * y_regions);
 							int percent = count * 100 / total;
 							float p = float(count) / total * 0.1;
-							if (p_step_function(0.6 + p, vformat(RTR("Integrate indirect lighting %d%%"), percent), p_bake_userdata, false)) {
+							if (p_step_function(0.5 + p, vformat(RTR("Plot direct lighting %d%%"), percent), p_bake_userdata, false)) {
 								FREE_TEXTURES
 								FREE_BUFFERS
 								FREE_RASTER_RESOURCES
@@ -2048,6 +1914,156 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 				}
 			}
 		}
+
+#ifdef DEBUG_TEXTURES
+
+		for (int i = 0; i < atlas_slices; i++) {
+			Vector<uint8_t> s = rd->texture_get_data(light_source_tex, i);
+			Ref<Image> img = Image::create_from_data(atlas_size.width, atlas_size.height, false, Image::FORMAT_RGBAH, s);
+			img->save_exr("res://2_light_primary_" + itos(i) + ".exr", false);
+		}
+
+		if (p_bake_sh) {
+			for (int i = 0; i < atlas_slices * 4; i++) {
+				Vector<uint8_t> s = rd->texture_get_data(light_accum_tex, i);
+				Ref<Image> img = Image::create_from_data(atlas_size.width, atlas_size.height, false, Image::FORMAT_RGBAH, s);
+				img->save_exr("res://2_light_primary_accum_" + itos(i) + ".exr", false);
+			}
+		}
+#endif
+
+		/* SECONDARY (indirect) LIGHT PASS(ES) */
+
+		if (p_bounces > 0) {
+			Vector<RD::Uniform> uniforms;
+			{
+				{
+					// Unused.
+					RD::Uniform u;
+					u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+					u.binding = 0;
+					u.append_id(light_dest_tex);
+					uniforms.push_back(u);
+				}
+				{
+					RD::Uniform u;
+					u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+					u.binding = 1;
+					u.append_id(light_source_tex);
+					uniforms.push_back(u);
+				}
+				{
+					RD::Uniform u;
+					u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+					u.binding = 2;
+					u.append_id(position_tex);
+					uniforms.push_back(u);
+				}
+				{
+					RD::Uniform u;
+					u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+					u.binding = 3;
+					u.append_id(normal_tex);
+					uniforms.push_back(u);
+				}
+				{
+					RD::Uniform u;
+					u.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+					u.binding = 4;
+					u.append_id(light_accum_tex);
+					uniforms.push_back(u);
+				}
+				{
+					RD::Uniform u;
+					u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+					u.binding = 5;
+					u.append_id(light_environment_tex);
+					uniforms.push_back(u);
+				}
+
+				{
+					RD::Uniform u;
+					u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+					u.binding = 6;
+					u.append_id(area_light_atlas_tex);
+					uniforms.push_back(u);
+				}
+			}
+
+			RID secondary_uniform_set;
+			secondary_uniform_set = rd->uniform_set_create(uniforms, compute_shader_secondary, 1);
+
+			const int max_rays = GLOBAL_GET("rendering/lightmapping/bake_performance/max_rays_per_pass");
+			int ray_iterations = Math::division_round_up((int32_t)push_constant.ray_count, max_rays);
+
+			if (p_step_function) {
+				if (p_step_function(0.6, RTR("Integrate indirect lighting"), p_bake_userdata, true)) {
+					FREE_TEXTURES
+					FREE_BUFFERS
+					FREE_RASTER_RESOURCES
+					FREE_COMPUTE_RESOURCES
+					memdelete(rd);
+					if (rcd != nullptr) {
+						memdelete(rcd);
+					}
+					return BAKE_ERROR_USER_ABORTED;
+				}
+			}
+
+			int count = 0;
+			for (int s = 0; s < atlas_slices; s++) {
+				push_constant.atlas_slice = s;
+
+				for (int i = 0; i < x_regions; i++) {
+					for (int j = 0; j < y_regions; j++) {
+						int x = i * max_region_size;
+						int y = j * max_region_size;
+						int w = MIN((i + 1) * max_region_size, atlas_size.width) - x;
+						int h = MIN((j + 1) * max_region_size, atlas_size.height) - y;
+
+						push_constant.region_ofs[0] = x;
+						push_constant.region_ofs[1] = y;
+
+						group_size = Vector3i(Math::division_round_up(w, 8), Math::division_round_up(h, 8), 1);
+
+						for (int k = 0; k < ray_iterations; k++) {
+							RD::ComputeListID compute_list = rd->compute_list_begin();
+							rd->compute_list_bind_compute_pipeline(compute_list, compute_shader_secondary_pipeline);
+							rd->compute_list_bind_uniform_set(compute_list, compute_base_uniform_set, 0);
+							rd->compute_list_bind_uniform_set(compute_list, secondary_uniform_set, 1);
+
+							push_constant.ray_from = k * max_rays;
+							push_constant.ray_to = MIN((k + 1) * max_rays, int32_t(push_constant.ray_count));
+							rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(PushConstant));
+							rd->compute_list_dispatch(compute_list, group_size.x, group_size.y, group_size.z);
+
+							rd->compute_list_end();
+							rd->submit();
+							rd->sync();
+
+							count++;
+							if (p_step_function) {
+								int total = (atlas_slices * x_regions * y_regions * ray_iterations);
+								int percent = count * 100 / total;
+								float p = float(count) / total * 0.1;
+								if (p_step_function(0.6 + p, vformat(RTR("Integrate indirect lighting %d%%"), percent), p_bake_userdata, false)) {
+									FREE_TEXTURES
+									FREE_BUFFERS
+									FREE_RASTER_RESOURCES
+									FREE_COMPUTE_RESOURCES
+									memdelete(rd);
+									if (rcd != nullptr) {
+										memdelete(rcd);
+									}
+									return BAKE_ERROR_USER_ABORTED;
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
 	}
 
 	/* LIGHTPROBES */
@@ -2163,6 +2179,25 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 				}
 			}
 		}
+	}
+
+
+	if (p_probes_only) {
+		if (probe_positions.size() > 0) {
+			probe_values.resize(probe_positions.size() * 9);
+			Vector<uint8_t> probe_data = rd->buffer_get_data(light_probe_buffer);
+			memcpy(probe_values.ptrw(), probe_data.ptr(), probe_data.size());
+			rd->free_rid(light_probe_buffer);
+		}
+		FREE_TEXTURES
+		FREE_BUFFERS
+		FREE_RASTER_RESOURCES
+		FREE_COMPUTE_RESOURCES
+		memdelete(rd);
+		if (rcd != nullptr) {
+			memdelete(rcd);
+		}
+		return BAKE_OK;
 	}
 
 #if 0

@@ -15,6 +15,32 @@
 	<tutorials>
 		<link title="Using Lightmap global illumination">$DOCS_URL/tutorials/3d/global_illumination/using_lightmap_gi.html</link>
 	</tutorials>
+	<methods>
+		<method name="bake_from_scene">
+			<return type="int" enum="LightmapGI.BakeError" />
+			<param index="0" name="from_node" type="Node" />
+			<param index="1" name="image_data_path" type="String" />
+			<description>
+				Runs the editor's native lightmap baker for [param from_node]. Requires an engine built with the lightmapper module and a real rendering device. Batch callers without an editor import callback save atlas textures as native resources.
+			</description>
+		</method>
+		<method name="bake_probes_from_scene">
+			<return type="int" enum="LightmapGI.BakeError" />
+			<param index="0" name="from_node" type="Node" />
+			<param index="1" name="image_data_path" type="String" />
+			<description>
+				Bakes native probe capture data without surface lightmaps. Requires an explicit output path and [member use_texture_for_bounces] set to [code]false[/code]. Uses the same native probe integration as the full bake; the scene determines the contribution of direct light, emission and environment. Publishes [LightmapGIData] only after a successful save.
+			</description>
+		</method>
+		<method name="bake_probe_field_from_scene">
+			<return type="int" enum="LightmapGI.BakeError" />
+			<param index="0" name="from_node" type="Node" />
+			<param index="1" name="image_data_path" type="String" />
+			<description>
+				Exports raw native SH to an ordinary [Resource], without capture tetrahedra or BSP. Requires an explicit [code].res[/code] path and [member use_texture_for_bounces] set to [code]false[/code]. Metadata [code]schema[/code] is [code]sh_probe_field_v1[/code]; [code]probe_data[/code] contains points, nine SH Colors per point, bounds, interior and baked_exposure. Leaves [member light_data] unchanged. The consumer supplies spatial interpolation.
+			</description>
+		</method>
+	</methods>
 	<members>
 		<member name="bias" type="float" setter="set_bias" getter="get_bias" default="0.0005">
 			The bias to use when computing shadows. Increasing [member bias] can fix shadow acne on the resulting baked lightmap, but can introduce peter-panning (shadows not connecting to their casters). Real-time [Light3D] shadows are not affected by this [member bias] property.
