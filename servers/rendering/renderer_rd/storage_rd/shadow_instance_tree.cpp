@@ -44,9 +44,7 @@ bool trace_enabled() {
 	return enabled;
 }
 uint32_t minimum_instances() {
-	static const uint32_t count = trace_enabled() && OS::get_singleton()->has_environment("ANGE_SHADOW_TREE_MIN_INSTANCES") ?
-			MAX(1, OS::get_singleton()->get_environment("ANGE_SHADOW_TREE_MIN_INSTANCES").to_int()) : 1024;
-	return count;
+	return 1024;
 }
 void trace_event(const char *p_event, const void *p_tree, uint64_t p_revision, uint64_t p_job_revision, uint32_t p_count, uint64_t p_usec = 0, bool p_worker = false, uint64_t p_owner_usec = 0) {
 	if (!trace_enabled()) {
@@ -75,7 +73,6 @@ struct ShadowInstanceTree::BuildJob {
 	uint64_t build_usec = 0;
 	bool on_worker = false;
 	bool pending_traced = false;
-	uint32_t delay_msec = 0;
 
 	explicit BuildJob(const ShadowInstanceTree &p_source) {
 		owner_key = &p_source;
@@ -83,25 +80,11 @@ struct ShadowInstanceTree::BuildJob {
 		tree.transforms = p_source.transforms;
 		tree.snapshot = p_source.snapshot;
 		tree.revision = p_source.revision;
-		// BEGIN density snapshot
-		tree.density = p_source.density;
-		tree.density_seed = p_source.density_seed;
-		tree.density_source_count = p_source.density_source_count;
-		tree.density_external = p_source.density_external;
-		tree.density_membership = p_source.density_membership;
-		tree.density_ready = p_source.density_ready;
-		// END density snapshot
 		caller_thread = Thread::get_caller_id();
-		if (trace_enabled()) {
-			delay_msec = CLAMP(OS::get_singleton()->get_environment("ANGE_SHADOW_TREE_DELAY_MSEC").to_int(), 0, 1000);
-		}
 	}
 	static void run(void *p_data) {
 		BuildJob *job = static_cast<BuildJob *>(p_data);
 		job->on_worker = Thread::get_caller_id() != job->caller_thread;
-		if (job->delay_msec) {
-			OS::get_singleton()->delay_usec(job->delay_msec * 1000);
-		}
 		uint64_t started = OS::get_singleton()->get_ticks_usec();
 		job->tree.rebuild_sync();
 		job->build_usec = OS::get_singleton()->get_ticks_usec() - started;
@@ -124,9 +107,6 @@ struct ShadowInstanceTree::BuildJob {
 };
 
 void ShadowInstanceTree::rebuild() {
-	// Only the frame preparation call may publish a density selection. Ordinary
-	// shadow/LOD queries later in the frame observe that same published snapshot.
-	if (density != 1 && !density_preparing) { return; }
 	if (async_job) {
 		valid = false;
 		if (!async_job->complete()) {
@@ -139,13 +119,7 @@ void ShadowInstanceTree::rebuild() {
 		const uint64_t owner_started = trace_enabled() ? OS::get_singleton()->get_ticks_usec() : 0;
 		async_job->reap();
 		const ShadowInstanceTree &built = async_job->tree;
-		const bool mutant = trace_enabled() && OS::get_singleton()->get_environment("ANGE_SHADOW_TREE_STALE_MUTANT") == "1";
-		if (built.revision == revision || mutant) {
-			// BEGIN density snapshot publication
-			density_ids = built.density_ids;
-			density_membership = built.density_membership;
-			density_ready = built.density_ready;
-			// END density snapshot publication
+		if (built.revision == revision) {
 			boxes = built.boxes;
 			order = built.order;
 			nodes = built.nodes;
@@ -163,7 +137,7 @@ void ShadowInstanceTree::rebuild() {
 	if (!dirty) {
 		return;
 	}
-	if (async_enabled() && WorkerThreadPool::get_singleton() && ((requested() && snapshot && uint32_t(transforms.size()) >= minimum_instances()) || (density != 1 && density_source_count >= minimum_instances()))) {
+	if (async_enabled() && WorkerThreadPool::get_singleton() && (requested() && snapshot && uint32_t(transforms.size()) >= minimum_instances())) {
 		valid = false;
 		const uint64_t started = OS::get_singleton()->get_ticks_usec();
 		async_job = std::make_shared<BuildJob>(*this);
@@ -177,16 +151,14 @@ void ShadowInstanceTree::rebuild() {
 }
 
 bool ShadowInstanceTree::get_conservative_aggregate(AABB &r_bounds) {
-	if (!async_enabled() && density == 1) {
+	if (!async_enabled()) {
 		if (!active()) {
 			return false;
 		}
 		r_bounds = get_aggregate();
 		return true;
 	}
-	if (trace_enabled() && OS::get_singleton()->get_environment("ANGE_SHADOW_TREE_BOUNDS_MUTANT") == "1") {
-		return false;
-	}
+
 	if (aggregate_revision == revision) {
 		r_bounds = conservative_aggregate;
 		return aggregate_valid;
@@ -256,9 +228,7 @@ bool ShadowInstanceTree::update_in_place(uint32_t p_index, const Transform3D &p_
 	}
 	const uint64_t started = trace_enabled() ? OS::get_singleton()->get_ticks_usec() : 0;
 	int leaf = update_leaves[p_index];
-	if (trace_enabled() && OS::get_singleton()->get_environment("ANGE_SHADOW_TREE_MAP_MUTANT") == "1") {
-		leaf = update_leaves[(p_index + transforms.size() / 2) % transforms.size()];
-	}
+
 	revision++;
 	transforms.write[p_index] = p_transform;
 	boxes.write[p_index] = box;
@@ -272,15 +242,13 @@ bool ShadowInstanceTree::update_in_place(uint32_t p_index, const Transform3D &p_
 	}
 	nodes.write[leaf].bounds = leaf_bounds;
 	if (lod_enabled()) { nodes.write[leaf].min_lod_scale = min_scale; nodes.write[leaf].max_lod_scale = max_scale; } // hierarchical LOD hook
-	const bool mutant = trace_enabled() && OS::get_singleton()->get_environment("ANGE_SHADOW_TREE_PARENT_MUTANT") == "1";
-	if (!mutant) {
-		for (int parent = update_parents[leaf]; parent >= 0; parent = update_parents[parent]) {
-			const Node ancestor = nodes[parent];
-			const AABB combined = nodes[ancestor.left].bounds.merge(nodes[ancestor.right].bounds);
-			nodes.write[parent].bounds = combined;
-			if (lod_enabled()) { nodes.write[parent].min_lod_scale = MIN(nodes[ancestor.left].min_lod_scale, nodes[ancestor.right].min_lod_scale); nodes.write[parent].max_lod_scale = MAX(nodes[ancestor.left].max_lod_scale, nodes[ancestor.right].max_lod_scale); } // hierarchical LOD hook
-		}
+	for (int parent = update_parents[leaf]; parent >= 0; parent = update_parents[parent]) {
+		const Node ancestor = nodes[parent];
+		const AABB combined = nodes[ancestor.left].bounds.merge(nodes[ancestor.right].bounds);
+		nodes.write[parent].bounds = combined;
+		if (lod_enabled()) { nodes.write[parent].min_lod_scale = MIN(nodes[ancestor.left].min_lod_scale, nodes[ancestor.right].min_lod_scale); nodes.write[parent].max_lod_scale = MAX(nodes[ancestor.left].max_lod_scale, nodes[ancestor.right].max_lod_scale); } // hierarchical LOD hook
 	}
+
 	conservative_aggregate = nodes[0].bounds;
 	aggregate_revision = revision;
 	aggregate_valid = true;

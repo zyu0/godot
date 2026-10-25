@@ -1556,10 +1556,6 @@ void MeshStorage::_multimesh_allocate_data(RID p_multimesh, int p_instances, RSE
 	}
 
 	multimesh->shadow_culling.reset();
-	multimesh->density_buffer_tail = false;
-	multimesh->density_map_revision = 0;
-	multimesh->density_prepared_frame = UINT64_MAX;
-	multimesh->density_remap_base = 0;
 	multimesh->shadow_buffer_exposed = false;
 	multimesh->shadow_auto_transforms.clear();
 	if (multimesh->shadow_bounds_mode == MultiMesh::SHADOW_BOUNDS_EXPLICIT) {
@@ -1631,8 +1627,7 @@ void MeshStorage::_multimesh_enable_motion_vectors(MultiMesh *multimesh) {
 
 	uint32_t buffer_size = multimesh->instances * multimesh->stride_cache * sizeof(float);
 	uint32_t new_buffer_size = buffer_size * 2;
-	uint32_t density_bytes = multimesh->density_buffer_tail ? ((multimesh->instances + 3u) & ~3u) * sizeof(uint32_t) : 0;
-	RID new_buffer = RD::get_singleton()->storage_buffer_create(new_buffer_size + density_bytes);
+	RID new_buffer = RD::get_singleton()->storage_buffer_create(new_buffer_size);
 
 	if (multimesh->buffer_set && multimesh->data_cache.is_empty()) {
 		// If the buffer was set but there's no data cached in the CPU, we copy the buffer directly on the GPU.
@@ -1644,10 +1639,6 @@ void MeshStorage::_multimesh_enable_motion_vectors(MultiMesh *multimesh) {
 		RD::get_singleton()->buffer_update(new_buffer, 0, new_buffer_size, multimesh->data_cache.ptr());
 	}
 
-	if (density_bytes) {
-		RD::get_singleton()->buffer_copy(multimesh->buffer, new_buffer, buffer_size, new_buffer_size, density_bytes);
-		if (multimesh->density_remap_base) { multimesh->density_remap_base = new_buffer_size / sizeof(float); }
-	}
 	if (multimesh->buffer.is_valid()) {
 		RD::get_singleton()->free_rid(multimesh->buffer);
 	}
@@ -2228,7 +2219,6 @@ RID MeshStorage::_multimesh_get_command_buffer_rd_rid(RID p_multimesh) const {
 RID MeshStorage::multimesh_get_buffer_rd_rid(RID p_multimesh) const {
 	MultiMesh *multimesh = multimesh_owner.get_or_null(p_multimesh);
 	ERR_FAIL_NULL_V(multimesh, RID());
-	ERR_FAIL_COND_V_MSG(multimesh->density_buffer_tail || multimesh->shadow_culling.density_is_configured(), RID(), "Instance density does not support externally owned RD buffer writes.");
 	// The public RID permits writes outside CPU setters. No automatic CPU
 	// hierarchy may assume it still describes this buffer after exposure.
 	multimesh->shadow_buffer_exposed = true;
@@ -2331,96 +2321,13 @@ void MeshStorage::multimesh_set_shadow_culling_aabb(RID p_multimesh, const AABB 
 	mm->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_AABB);
 }
 
-MeshStorage::DensityDraw MeshStorage::multimesh_prepare_density(RID p_multimesh) {
-	MultiMesh *mm = multimesh_owner.get_or_null(p_multimesh);
-	const uint32_t visible = mm->visible_instances >= 0 ? mm->visible_instances : mm->instances;
-	DensityDraw native = { visible, 0 };
-	const uint64_t frame = RSG::rasterizer->get_frame_number();
-	static uint64_t config_frame = UINT64_MAX;
-	static float factor = 1;
-	static int32_t seed = 1;
-	if (config_frame != frame) {
-		const String density_text = OS::get_singleton()->get_environment("ANGE_INSTANCE_DENSITY");
-		const String seed_text = OS::get_singleton()->get_environment("ANGE_INSTANCE_DENSITY_SEED");
-		ERR_FAIL_COND_V_MSG(!density_text.is_empty() && !density_text.is_valid_float(), native, "ANGE_INSTANCE_DENSITY must be a finite number in [0,1].");
-		const float requested = density_text.is_empty() ? 1.0f : density_text.to_float();
-		ERR_FAIL_COND_V_MSG(!Math::is_finite(requested) || requested < 0 || requested > 1, native, "ANGE_INSTANCE_DENSITY must be a finite number in [0,1].");
-		ERR_FAIL_COND_V_MSG(!seed_text.is_empty() && (!seed_text.is_valid_int() || seed_text.to_int() < INT32_MIN || seed_text.to_int() > INT32_MAX), native, "ANGE_INSTANCE_DENSITY_SEED must be int32.");
-		factor = requested;
-		seed = seed_text.is_empty() ? 1 : int32_t(seed_text.to_int());
-		config_frame = frame;
-	}
-	if (factor == 1 && !mm->density_buffer_tail && !mm->shadow_culling.density_is_configured()) {
-		return native;
-	}
-	if (mm->xform_format != RSE::MULTIMESH_TRANSFORM_3D || mm->indirect || mm->shadow_buffer_exposed) {
-		ERR_PRINT_ONCE("Instance density requires CPU-authored ordinary 3D MultiMesh; 2D, indirect and externally exposed RD buffers are unsupported.");
-		return native;
-	}
-	if (mm->density_prepared_frame == frame) {
-		if (mm->shadow_culling.has_density_selection()) {
-			const Vector<uint32_t> &ids = mm->shadow_culling.get_density_ids();
-			mm->density_draw_count = ids.is_empty() ? 0 : uint32_t(std::lower_bound(ids.ptr(), ids.ptr() + ids.size(), visible) - ids.ptr());
-		} else { mm->density_draw_count = visible; }
-		return { mm->density_draw_count, mm->density_remap_base };
-	}
-	mm->density_prepared_frame = frame;
-	mm->density_draw_count = visible;
-	mm->density_remap_base = 0;
-	mm->shadow_culling.set_density(factor, seed, mm->instances);
-	mm->shadow_culling.prepare_density_frame(frame);
-	static const bool density_trace = OS::get_singleton()->get_environment("ANGE_SHADOW_TREE_TRACE") == "1";
-	if (density_trace && OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_TRACE_HOLD") != "1") {
-		Dictionary report;
-		report["frame"] = int64_t(frame);
-		report["rid"] = int64_t(p_multimesh.get_id());
-		report["revision"] = int64_t(mm->shadow_culling.get_revision());
-		report["factor"] = factor;
-		report["seed"] = seed;
-		report["allocated"] = mm->instances;
-		report["visible"] = int64_t(visible);
-		report["published"] = mm->shadow_culling.has_density_selection();
-		report["current_offset"] = int64_t(mm->motion_vectors_current_offset);
-		report["previous_offset"] = int64_t(mm->motion_vectors_previous_offset);
-		Array selected;
-		for (uint32_t id = 0; id < visible; id++) { if (mm->shadow_culling.density_allows(id)) { selected.push_back(int64_t(id)); } }
-		report["ids"] = selected;
-		print_line("INSTANCE_DENSITY_SELECTION " + JSON::stringify(report));
-	}
-	if (factor == 1 || !mm->shadow_culling.has_density_selection() || mm->instances == 0) {
-		return native;
-	}
-	const Vector<uint32_t> &ids = mm->shadow_culling.get_density_ids();
-	mm->density_draw_count = ids.is_empty() ? 0 : uint32_t(std::lower_bound(ids.ptr(), ids.ptr() + ids.size(), visible) - ids.ptr());
-	if (ids.is_empty()) { return { 0, 0 }; }
-	const uint32_t record_bytes = mm->instances * mm->stride_cache * sizeof(float) * (mm->motion_vectors_enabled ? 2 : 1);
-	if (!mm->density_buffer_tail) {
-		const uint32_t id_bytes = ((mm->instances + 3u) & ~3u) * sizeof(uint32_t);
-		RID buffer = RD::get_singleton()->storage_buffer_create(record_bytes + id_bytes);
-		RD::get_singleton()->buffer_copy(mm->buffer, buffer, 0, 0, record_bytes);
-		RD::get_singleton()->free_rid(mm->buffer);
-		mm->buffer = buffer;
-		mm->uniform_set_3d = RID();
-		mm->density_buffer_tail = true;
-		mm->density_map_revision = 0;
-		mm->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MULTIMESH);
-	}
-	if (mm->density_map_revision != mm->shadow_culling.get_revision()) {
-		RD::get_singleton()->buffer_update(mm->buffer, record_bytes, ids.size() * sizeof(uint32_t), ids.ptr());
-		mm->density_map_revision = mm->shadow_culling.get_revision();
-	}
-	mm->density_remap_base = record_bytes / sizeof(float);
-	return { mm->density_draw_count, mm->density_remap_base };
-}
-
 ShadowInstanceTree *MeshStorage::multimesh_get_shadow_culling(RID p_multimesh, bool p_allow_auto) {
 	MultiMesh *mm = multimesh_owner.get_or_null(p_multimesh);
 	if (!mm || mm->indirect || mm->xform_format != RSE::MULTIMESH_TRANSFORM_3D || mm->instances == 0) {
 		return nullptr;
 	}
 	static const bool trace = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_TRACE") == "1";
-	static const bool disabled_mutant = trace && OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_AUTO_MUTANT") == "disabled";
-	if (mm->shadow_bounds_mode == MultiMesh::SHADOW_BOUNDS_DISABLED && !(disabled_mutant && p_allow_auto)) {
+	if (mm->shadow_bounds_mode == MultiMesh::SHADOW_BOUNDS_DISABLED) {
 		return nullptr;
 	}
 	if (mm->shadow_bounds_mode != MultiMesh::SHADOW_BOUNDS_EXPLICIT) {

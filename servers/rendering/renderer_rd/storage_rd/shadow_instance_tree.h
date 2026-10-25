@@ -1,6 +1,5 @@
 #pragma once
 
-#include "instance_density_policy.h"
 #include "core/math/projection.h"
 #include "core/math/transform_3d.h"
 #include "core/templates/vector.h"
@@ -37,28 +36,6 @@ class ShadowInstanceTree {
 	bool aggregate_valid = false;
 	void rebuild();
 
-	// BEGIN density publication state
-	float density = 1;
-	int32_t density_seed = 1;
-	uint32_t density_source_count = 0;
-	Vector<uint32_t> density_ids;
-	Vector<uint8_t> density_membership;
-	bool density_ready = false;
-	bool density_external = false;
-	uint64_t density_frame = UINT64_MAX;
-	bool density_preparing = false;
-	void rebuild_density() {
-		if (density_external || density == 1) { return; }
-		density_ids.clear();
-		density_membership.resize(density_source_count);
-		density_membership.fill(0);
-		InstanceDensityPolicy::admit(density_seed, density, density_source_count, [&](uint32_t id) {
-			density_ids.push_back(id);
-			density_membership.write[id] = 1;
-		});
-		density_ready = true;
-	}
-	// END density publication state
 
 	// BEGIN in-place update state
 	Vector<int> update_parents;
@@ -101,7 +78,6 @@ class ShadowInstanceTree {
 		}
 		dirty = false;
 		valid = false;
-		rebuild_density(); // density hook
 		nodes.clear();
 		update_parents.clear(); // in-place hook
 		update_leaves.clear(); // in-place hook
@@ -129,41 +105,6 @@ class ShadowInstanceTree {
 	}
 
 public:
-	// BEGIN density publication interface
-	void set_density(float p_density, int32_t p_seed, uint32_t p_count) {
-		if (density == p_density && density_seed == p_seed && density_source_count == p_count) { return; }
-		density = p_density;
-		density_seed = p_seed;
-		density_source_count = p_count;
-		density_external = false;
-		density_ready = false;
-		density_ids.clear();
-		density_membership.clear();
-		dirty = true;
-		revision++;
-	}
-	void prepare_density_frame(uint64_t p_frame) {
-		if (density_frame == p_frame) { return; }
-		density_frame = p_frame;
-		density_preparing = true;
-		rebuild();
-		density_preparing = false;
-	}
-	bool uses_density_membership() const { return density_external || has_density_selection(); }
-	bool density_is_configured() const { return density != 1; }
-	bool has_density_selection() const { return density != 1 && density_ready; }
-	const Vector<uint32_t> &get_density_ids() const { return density_ids; }
-	bool density_allows(uint32_t p_id) const {
-		return (!density_external && !has_density_selection()) || density_membership[p_id] != 0;
-	}
-	void set_density_membership(const Vector<uint8_t> &p_membership) {
-		density_external = true;
-		density_membership = p_membership;
-		density_ready = true;
-		dirty = true;
-		revision++;
-	}
-	// END density publication interface
 	// BEGIN hierarchical LOD view
 	static bool lod_enabled();
 	static float lod_basis_scale(const Basis &p_basis);
@@ -182,7 +123,6 @@ public:
 	uint64_t get_revision() const { return revision; }
 	void reset() {
 		revision++;
-		density_ready = false; density_ids.clear(); density_membership.clear(); density_external = false; density_frame = UINT64_MAX; // density hook
 		local_bounds = AABB();
 		transforms.clear();
 		lod_scales.clear(); // hierarchical LOD hook
@@ -304,7 +244,7 @@ public:
 			if (node.left < 0) {
 				for (uint32_t i = 0; i < node.count; i++) {
 					uint32_t id = order[node.from + i];
-					if (id < p_visible && density_allows(id)) {
+					if (id < p_visible) {
 						result.push_back(id);
 					}
 				}

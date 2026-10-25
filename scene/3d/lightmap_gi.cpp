@@ -1093,8 +1093,7 @@ LightmapGI::BakeError LightmapGI::bake_probe_field_from_scene(Node *p_from_node,
 LightmapGI::BakeError LightmapGI::_bake_from_scene(Node *p_from_node, const String &p_image_data_path, bool p_probes_only, bool p_probe_field_only) {
 	return bake(p_from_node, p_image_data_path, [](float p_completion, const String &p_text, void *, bool) {
 		print_line(vformat("LIGHTMAP_NATIVE_BAKE %0.1f%% %s", p_completion * 100.0f, p_text));
-		const String cancel_stage = OS::get_singleton()->get_environment("GODOT_LIGHTMAP_CANCEL_STAGE");
-		return !cancel_stage.is_empty() && p_text.begins_with(cancel_stage);
+		return false;
 	}, nullptr, p_probes_only, p_probe_field_only);
 }
 

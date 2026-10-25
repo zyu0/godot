@@ -231,11 +231,6 @@ private:
 	struct MultiMesh {
 		ShadowInstanceTree shadow_culling;
 		// ID metadata follows all transform records, including both motion halves.
-		bool density_buffer_tail = false;
-		uint64_t density_map_revision = 0;
-		uint64_t density_prepared_frame = UINT64_MAX;
-		uint32_t density_draw_count = 0;
-		uint32_t density_remap_base = 0;
 		enum ShadowBoundsMode { SHADOW_BOUNDS_AUTO, SHADOW_BOUNDS_EXPLICIT, SHADOW_BOUNDS_DISABLED };
 		ShadowBoundsMode shadow_bounds_mode = SHADOW_BOUNDS_AUTO;
 		bool shadow_buffer_exposed = false;
@@ -709,8 +704,6 @@ public:
 
 	void multimesh_set_shadow_culling_aabb(RID p_multimesh, const AABB &p_aabb) override;
 	ShadowInstanceTree *multimesh_get_shadow_culling(RID p_multimesh, bool p_allow_auto);
-	struct DensityDraw { uint32_t count; uint32_t remap_base; };
-	DensityDraw multimesh_prepare_density(RID p_multimesh);
 	virtual void _multimesh_set_custom_aabb(RID p_multimesh, const AABB &p_aabb) override;
 	virtual AABB _multimesh_get_custom_aabb(RID p_multimesh) const override;
 

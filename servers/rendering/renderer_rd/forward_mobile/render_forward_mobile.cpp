@@ -60,33 +60,12 @@
 #define PRELOAD_PIPELINES_ON_SURFACE_CACHE_CONSTRUCTION 1
 
 static bool shadow_instance_merge_enabled() {
-	static bool enabled = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_MERGE") == "1";
-	// Lab-only same-process comparisons. Production keeps the startup setting.
-	static const bool live_review = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_MERGE_LIVE_REVIEW") == "1";
-	static uint64_t frame = UINT64_MAX;
-	if (live_review && frame != RD::get_singleton()->get_frames_drawn()) {
-		frame = RD::get_singleton()->get_frames_drawn();
-		bool next = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_MERGE") == "1";
-		if (next != enabled) {
-			print_line("SHADOW_INSTANCE_MERGE_MODE " + itos(next));
-			enabled = next;
-		}
-	}
+	static const bool enabled = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_MERGE") == "1";
 	return enabled;
 }
 
 static bool shadow_instance_merge_cpu_first_enabled() {
-	static bool enabled = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_MERGE_CPU_FIRST") != "0";
-	static const bool live_review = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_MERGE_LIVE_REVIEW") == "1";
-	static uint64_t frame = UINT64_MAX;
-	if (live_review && frame != RD::get_singleton()->get_frames_drawn()) {
-		frame = RD::get_singleton()->get_frames_drawn();
-		bool next = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_MERGE_CPU_FIRST") != "0";
-		if (next != enabled) {
-			print_line("SHADOW_INSTANCE_MERGE_CPU_FIRST_MODE " + itos(next));
-			enabled = next;
-		}
-	}
+	static const bool enabled = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_MERGE_CPU_FIRST") != "0";
 	return enabled;
 }
 
@@ -2083,7 +2062,7 @@ void RenderForwardMobile::_render_shadow_append(RID p_framebuffer, const PagedAr
 		for (uint32_t i = 0; i < render_list_size; i++) {
 			GeometryInstanceSurfaceDataCache *surface = render_list[RENDER_LIST_SECONDARY].elements[render_list_from + i];
 			GeometryInstanceForwardMobile *owner = surface->owner;
-			if (!(owner->base_flags & INSTANCE_DATA_FLAG_MULTIMESH) || (owner->base_flags & (INSTANCE_DATA_FLAG_MULTIMESH_INDIRECT | INSTANCE_DATA_FLAG_PARTICLES)) || owner->instance_count == 0 || owner->density_draw_count == 0) {
+			if (!(owner->base_flags & INSTANCE_DATA_FLAG_MULTIMESH) || (owner->base_flags & (INSTANCE_DATA_FLAG_MULTIMESH_INDIRECT | INSTANCE_DATA_FLAG_PARTICLES)) || owner->instance_count == 0) {
 				continue;
 			}
 			groups[owner].push_back(i);
@@ -2103,7 +2082,6 @@ void RenderForwardMobile::_render_shadow_append(RID p_framebuffer, const PagedAr
 		HashMap<uint32_t, Vector<uint32_t>> buckets;
 		// Ordinary CPU-owned instance fields participate without a scene controller.
 		static const bool auto_bounds_enabled = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_AUTO") != "0";
-		static const bool auto_deformation_mutant = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_TRACE") == "1" && OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_AUTO_MUTANT") == "deformation";
 		for (const KeyValue<GeometryInstanceForwardMobile *, Vector<uint32_t>> &group : groups) {
 			GeometryInstanceForwardMobile *owner = group.key;
 			ShadowInstanceTree *tree = mesh_storage->multimesh_get_shadow_culling(owner->data->base, false);
@@ -2117,7 +2095,7 @@ void RenderForwardMobile::_render_shadow_append(RID p_framebuffer, const PagedAr
 			for (uint32_t index : group.value) {
 				GeometryInstanceSurfaceDataCache *surface = render_list[RENDER_LIST_SECONDARY].elements[render_list_from + index];
 				SceneShaderForwardMobile::ShaderData *shadow_shader = surface->shader_shadow;
-				if (!surface->surface_shadow || !shadow_shader || shadow_shader->writes_position || shadow_shader->writes_modelview_or_projection || shadow_shader->uses_skip_vertex_transform || shadow_shader->uses_point_size || shadow_shader->uses_world_coordinates || (!explicit_bounds && shadow_shader->uses_vertex && !auto_deformation_mutant)) {
+				if (!surface->surface_shadow || !shadow_shader || shadow_shader->writes_position || shadow_shader->writes_modelview_or_projection || shadow_shader->uses_skip_vertex_transform || shadow_shader->uses_point_size || shadow_shader->uses_world_coordinates || (!explicit_bounds && shadow_shader->uses_vertex)) {
 					continue;
 				}
 				if (!tree) {
@@ -2255,11 +2233,6 @@ void RenderForwardMobile::_render_shadow_append(RID p_framebuffer, const PagedAr
 				if (!needs_gpu) {
 					// Keep native direct draws and exact per-surface CPU skips out
 					// of gather/indirect work. Only unresolved GPU work is merged.
-					static const bool mutant = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_TRACE") == "1" && OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_CPU_FIRST_MUTANT") == "1";
-					if (mutant && !cpu_draws.is_empty() && cpu_draws[0].skip()) {
-						cpu_draws.clear();
-						WARN_PRINT_ONCE("SHADOW_INSTANCE_CPU_FIRST_MUTANT direct_for_skip");
-					}
 					if (cpu_draws.size() == item.indices.size()) {
 						for (int i = 0; i < cpu_draws.size(); i++) { shadow_pass.cull_draws.write[item.indices[i]] = cpu_draws[i]; }
 					}
@@ -2959,19 +2932,6 @@ void RenderForwardMobile::_fill_render_list(RenderListType p_render_list, const 
 
 	for (int i = 0; i < (int)p_render_data->instances->size(); i++) {
 		GeometryInstanceForwardMobile *inst = static_cast<GeometryInstanceForwardMobile *>((*p_render_data->instances)[i]);
-		// Prepare one shared membership before any main/shadow draw consumes it.
-		inst->density_draw_count = inst->instance_count;
-		inst->density_remap_base = 0;
-		if ((inst->base_flags & INSTANCE_DATA_FLAG_MULTIMESH) && !(inst->base_flags & INSTANCE_DATA_FLAG_PARTICLES)) {
-			auto density_draw = mesh_storage->multimesh_prepare_density(inst->data->base);
-			inst->density_draw_count = density_draw.count;
-			inst->density_remap_base = density_draw.remap_base;
-			if (density_draw.remap_base) {
-				inst->transforms_uniform_set = mesh_storage->multimesh_get_3d_uniform_set(inst->data->base, scene_shader.default_shader_rd, TRANSFORMS_UNIFORM_SET);
-			}
-		}
-
-
 		Vector3 center = inst->transform.origin;
 		if (p_render_data->scene_data->cam_orthogonal) {
 			if (inst->use_aabb_center) {
@@ -3218,15 +3178,12 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 	uint32_t prev_pipeline_hash = 0;
 
 	bool shadow_pass = (p_pass_mode == PASS_MODE_SHADOW) || (p_pass_mode == PASS_MODE_SHADOW_DP);
-	static const bool density_shadow_only_mutant = OS::get_singleton()->get_environment("ANGE_SHADOW_TREE_TRACE") == "1" && OS::get_singleton()->get_environment("ANGE_INSTANCE_DENSITY_MUTANT") == "shadow_only";
 
 	for (uint32_t i = p_from_element; i < p_to_element; i++) {
 		const GeometryInstanceSurfaceDataCache *surf = p_params->elements[i];
 		const GeometryInstanceForwardMobile *inst = surf->owner;
-		const bool omit_main_density = density_shadow_only_mutant && !shadow_pass;
-		const uint32_t density_count = omit_main_density ? inst->instance_count : inst->density_draw_count;
 
-		if (inst->instance_count == 0 || density_count == 0) {
+		if (inst->instance_count == 0) {
 			continue;
 		}
 
@@ -3329,7 +3286,7 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 
 		pipeline_key.primitive_type = surf->primitive;
 		RID xforms_uniform_set = surf->owner->transforms_uniform_set;
-		push_constant.shadow_instance_remap_base = omit_main_density ? 0 : inst->density_remap_base;
+		push_constant.shadow_instance_remap_base = 0;
 		push_constant.shadow_instance_original_id_base = 0;
 		const RendererRD::ShadowInstanceCulling::Draw *culled_draw = selected_lod_draw;
 		if (!culled_draw && p_pass_mode == PASS_MODE_SHADOW && p_params->shadow_cull_draws && p_params->shadow_cull_draws[i].commands.is_valid()) {
@@ -3496,19 +3453,7 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 
 			RD::get_singleton()->draw_list_set_push_constant(draw_list, &push_constant, push_constant_size);
 
-			static const bool density_trace = OS::get_singleton()->get_environment("ANGE_SHADOW_TREE_TRACE") == "1";
-			if (density_trace && (inst->base_flags & INSTANCE_DATA_FLAG_MULTIMESH) && !(inst->base_flags & INSTANCE_DATA_FLAG_PARTICLES) && OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_TRACE_HOLD") != "1") {
-				Dictionary report;
-				report["frame"] = int64_t(RSG::rasterizer->get_frame_number());
-				report["rid"] = int64_t(inst->data->base.get_id());
-				report["pass"] = int(p_pass_mode);
-				report["allocated_draw_prefix"] = int64_t(inst->instance_count);
-				report["density_draw_count"] = int64_t(density_count);
-				report["remap_base"] = int64_t(push_constant.shadow_instance_remap_base);
-				report["gpu_culled"] = culled_draw != nullptr;
-				print_line("INSTANCE_DENSITY_DRAW " + JSON::stringify(report));
-			}
-			uint32_t instance_count = MIN(surf->owner->instance_count, density_count);
+			uint32_t instance_count = surf->owner->instance_count;
 			instance_count = MAX(instance_count, 1u);
 			if (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_PARTICLE_TRAILS) {
 				instance_count /= surf->owner->trail_steps;
@@ -3553,7 +3498,6 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 					report["base"] = int64_t(surf->owner->data->base.get_id());
 					report["surface"] = int64_t(surf->surface_index);
 					report["lod"] = int64_t(element_info.lod_index);
-					report["density_remap_base"] = int64_t(surf->owner->density_remap_base);
 					report["lod_draw"] = lod_draw_index;
 					report["primitive"] = int(surf->primitive);
 					report["geometry_count"] = int64_t(mesh_storage->mesh_surface_get_shadow_draw_count(mesh_surface, element_info.lod_index));
@@ -4250,7 +4194,7 @@ void RenderForwardMobile::_mesh_compile_pipelines_for_surface(const SurfacePipel
 		for (uint32_t use_post_pass = post_pass_start; use_post_pass < post_pass_iterations; use_post_pass++) {
 			const uint32_t hdr_iterations = use_post_pass ? hdr_target_iterations : (hdr_start + 1);
 			for (uint32_t use_hdr = hdr_start; use_hdr < hdr_iterations; use_hdr++) {
-				const RD::DataFormat buffers_color_format = use_hdr ? RenderSceneBuffersRD::get_mobile_hdr_format() : _render_buffers_get_preferred_color_format();
+				const RD::DataFormat buffers_color_format = use_hdr ? RD::DATA_FORMAT_R16G16B16A16_SFLOAT : _render_buffers_get_preferred_color_format();
 				pipeline_key.version = SceneShaderForwardMobile::SHADER_VERSION_COLOR_PASS;
 				pipeline_key.framebuffer_format_id = _get_color_framebuffer_format_for_pipeline(buffers_color_format, buffers_can_be_storage, RD::TextureSamples(p_global.texture_samples), RD::TextureSamples(p_global.target_samples), use_vrs, use_post_pass, use_hdr, 1);
 				_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);

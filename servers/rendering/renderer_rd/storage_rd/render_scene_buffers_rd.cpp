@@ -32,7 +32,6 @@
 #include "render_scene_buffers_rd.compat.inc"
 
 #include "core/object/class_db.h"
-#include "core/os/os.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/rendering_device_binds.h"
 #include "servers/rendering/rendering_server.h" // IWYU pragma: keep // Needed to bind RSE enums.
@@ -864,26 +863,6 @@ RD::DataFormat RenderSceneBuffersRD::get_vrs_format() {
 
 uint32_t RenderSceneBuffersRD::get_vrs_usage_bits() {
 	return RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_VRS_ATTACHMENT_BIT;
-}
-
-// Opt-in prototype: retain the normal RGBA16F default until A/B validation.
-RD::DataFormat RenderSceneBuffersRD::get_mobile_hdr_format() {
-	const BitField<RD::TextureUsageBits> usage = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_INPUT_ATTACHMENT_BIT;
-	if (OS::get_singleton()->get_environment("ANGE_MOBILE_HDR_R11") == "1" && RD::get_singleton()->texture_is_format_supported_for_usage(RD::DATA_FORMAT_B10G11R11_UFLOAT_PACK32, usage)) {
-		return RD::DATA_FORMAT_B10G11R11_UFLOAT_PACK32;
-	}
-	return RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
-}
-
-RD::DataFormat RenderSceneBuffersRD::get_base_data_format() const {
-	if (!force_hdr) {
-		return preferred_data_format;
-	}
-	// Forward+ and transparent outputs retain alpha and storage compatibility.
-	if (can_be_storage || RendererRD::TextureStorage::get_singleton()->render_target_get_transparent(render_target)) {
-		return RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
-	}
-	return get_mobile_hdr_format();
 }
 
 float RenderSceneBuffersRD::get_luminance_multiplier() const {

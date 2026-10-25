@@ -852,7 +852,6 @@ void RenderingDeviceGraph::_run_raytracing_list_command(RDD::CommandBufferID p_c
 }
 
 void RenderingDeviceGraph::_run_compute_list_command(RDD::CommandBufferID p_command_buffer, const uint8_t *p_instruction_data, uint32_t p_instruction_data_size) {
-	driver->command_begin_compute_pass(p_command_buffer);
 	uint32_t instruction_data_cursor = 0;
 	while (instruction_data_cursor < p_instruction_data_size) {
 		DEV_ASSERT((instruction_data_cursor + sizeof(ComputeListInstruction)) <= p_instruction_data_size);
@@ -893,13 +892,11 @@ void RenderingDeviceGraph::_run_compute_list_command(RDD::CommandBufferID p_comm
 			} break;
 			default:
 				DEV_ASSERT(false && "Unknown compute list instruction type.");
-				driver->command_end_compute_pass(p_command_buffer);
 				return;
 		}
 
 		instruction_data_cursor = GRAPH_ALIGN(instruction_data_cursor);
 	}
-	driver->command_end_compute_pass(p_command_buffer);
 }
 
 void RenderingDeviceGraph::_get_draw_list_render_pass_and_framebuffer(const RecordedDrawListCommand *p_draw_list_command, RDD::RenderPassID &r_render_pass, RDD::FramebufferID &r_framebuffer) {

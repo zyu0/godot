@@ -248,8 +248,7 @@ Vector<ShadowInstanceCulling::Draw> ShadowInstanceCulling::prepare(RID p_source,
 	}
 	ShadowCullCpuTimer cpu_timer(1);
 	Vector<Draw> draws;
-	static const bool projection_only = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_PROJECTION_ONLY") == "1";
-	const Vector<Plane> caster_planes = projection_only ? Vector<Plane>() : p_caster_planes;
+	const Vector<Plane> &caster_planes = p_caster_planes;
 	for (const Plane &plane : caster_planes) {
 		if (!plane.is_finite()) {
 			WARN_PRINT_ONCE("Non-finite shadow caster plane; retaining normal draws.");
@@ -269,8 +268,7 @@ Vector<ShadowInstanceCulling::Draw> ShadowInstanceCulling::prepare(RID p_source,
 		}
 		return result;
 	};
-	static const bool force_fine_env = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_FORCE_FINE") == "1";
-	const bool force_fine = force_fine_env || p_sources != nullptr || p_lods != nullptr;
+	const bool force_fine = p_sources != nullptr || p_lods != nullptr;
 	if (!force_fine) {
 		const AABB aggregate = p_tree.get_aggregate();
 		const Vector3 center = aggregate.get_center();
@@ -302,8 +300,8 @@ Vector<ShadowInstanceCulling::Draw> ShadowInstanceCulling::prepare(RID p_source,
 	}
 	Vector<uint32_t> candidates = p_tree.candidates(p_projection, p_instances, p_pancake);
 	// An empty conservative query needs no GPU work, including merged/LOD
-	// jobs. Keep the explicit fine-test diagnostic able to exercise empty input.
-	if (!force_fine_env && candidates.is_empty()) {
+	// jobs.
+	if (candidates.is_empty()) {
 		return cpu_draws(2);
 	}
 	// One visible instance cannot benefit from compaction. Conservative CPU
@@ -393,10 +391,9 @@ Vector<ShadowInstanceCulling::Draw> ShadowInstanceCulling::prepare(RID p_source,
 	Vector<uint8_t> active_lod_buckets;
 	if (p_sources) {
 		candidate_data.resize(candidates.size() * 2);
-		static const bool mutant_local_ids = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_TRACE") == "1" && OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_MUTANT_LOCAL_IDS") == "1";
 		for (int i = 0; i < candidates.size(); i++) {
 			candidate_data.write[i * 2] = candidates[i];
-			candidate_data.write[i * 2 + 1] = mutant_local_ids ? candidates[i] : (*p_original_ids)[candidates[i]];
+			candidate_data.write[i * 2 + 1] = (*p_original_ids)[candidates[i]];
 		}
 	}
 	if (p_lods) {
@@ -472,12 +469,7 @@ Vector<ShadowInstanceCulling::Draw> ShadowInstanceCulling::prepare(RID p_source,
 			}
 			destination += slice.count;
 		}
-		static const bool fail_after_gather = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_MERGE_FAIL_AFTER_GATHER") == "1";
-		if (fail_after_gather) {
-			static bool reported = false;
-			if (!reported) { print_line("SHADOW_INSTANCE_MERGE_INJECTED_FAILURE after_gather"); reported = true; }
-			return draws;
-		}
+
 	}
 	// Fine culling copies only surviving records. Native vertex drawing never
 	// reads other slots, so no whole-batch source-to-output transfer is needed.
@@ -541,11 +533,6 @@ Vector<ShadowInstanceCulling::Draw> ShadowInstanceCulling::prepare(RID p_source,
 		report["frame"] = int64_t(frame);
 		report["command_buffer"] = int64_t(job.commands.get_id());
 		report["input"] = int64_t(p_instances);
-		if (p_tree.uses_density_membership()) {
-			Array selected;
-			for (uint32_t id = 0; id < p_instances; id++) { if (p_tree.density_allows(id)) { selected.push_back(int64_t(id)); } }
-			report["density_ids"] = selected;
-		}
 		report["allocated"] = int64_t(p_tree.get_transform_count());
 		// The native hierarchy includes hidden records whose GPU upload regions
 		// may deliberately be stale. Capture CPU hierarchy inputs separately;
@@ -660,23 +647,17 @@ ShadowInstanceCulling::MergeResult ShadowInstanceCulling::prepare_merged(const V
 	MergeResult result;
 	if (p_sources.size() < 2 || p_draw_counts.is_empty()) { return result; }
 	static const bool enabled = OS::get_singleton()->get_environment("ANGE_SHADOW_MERGE_CACHE") != "0";
-	static const bool trace = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_TRACE") == "1";
-	static const bool ignore_revisions = trace && OS::get_singleton()->get_environment("ANGE_SHADOW_MERGE_CACHE_MUTANT_REVISION") == "1";
-	static const bool force_collision = trace && OS::get_singleton()->get_environment("ANGE_SHADOW_MERGE_CACHE_HASH_COLLISION") == "1";
 	Vector<MergeSourceKey> keys;
 	uint32_t instance_count = 0;
-	bool density_filtered = false;
 	uint32_t hash = HASH_MURMUR3_SEED;
 	for (const SourceSlice &slice : p_sources) {
 		if (!slice.tree || !slice.tree->active() || slice.buffer.is_null() || slice.count == 0 || slice.count > slice.tree->get_transform_count() || uint64_t(instance_count) + slice.count > 65536) { return result; }
-		density_filtered |= slice.tree->has_density_selection();
 		keys.push_back({ slice.buffer, slice.tree->get_revision(), slice.count, slice.offset });
 		instance_count += slice.count;
 		hash = hash_murmur3_one_64(slice.buffer.get_id(), hash);
 		hash = hash_murmur3_one_32(slice.count, hash);
 		hash = hash_murmur3_one_32(slice.offset, hash);
 	}
-	if (force_collision) { hash = 7; }
 	const uint64_t current_frame = RD::get_singleton()->get_frames_drawn();
 	if (enabled && merge_cache_prune_frame != current_frame) {
 		Vector<uint32_t> expired;
@@ -696,7 +677,7 @@ ShadowInstanceCulling::MergeResult ShadowInstanceCulling::prepare_merged(const V
 		for (int i = 0; i < keys.size(); i++) {
 			const MergeSourceKey &a = cached->sources[i];
 			const MergeSourceKey &b = keys[i];
-			if (a.buffer != b.buffer || a.count != b.count || a.offset != b.offset || (!ignore_revisions && a.revision != b.revision)) { hit = false; break; }
+			if (a.buffer != b.buffer || a.count != b.count || a.offset != b.offset || a.revision != b.revision) { hit = false; break; }
 		}
 	}
 	if (!hit) {
@@ -720,8 +701,6 @@ ShadowInstanceCulling::MergeResult ShadowInstanceCulling::prepare_merged(const V
 		} else { cached = &uncached; }
 		cached->sources = keys;
 		Vector<Transform3D> transforms;
-		Vector<uint8_t> membership;
-		if (density_filtered) { membership.resize(instance_count); }
 		transforms.resize(instance_count);
 		cached->original_ids.resize(instance_count);
 		AABB bounds;
@@ -729,14 +708,12 @@ ShadowInstanceCulling::MergeResult ShadowInstanceCulling::prepare_merged(const V
 		for (const SourceSlice &slice : p_sources) {
 			bounds = at == 0 ? slice.tree->get_local_bounds() : bounds.merge(slice.tree->get_local_bounds());
 			for (uint32_t i = 0; i < slice.count; i++) {
-				if (density_filtered) { membership.write[at] = slice.tree->density_allows(i) ? 1 : 0; }
 				transforms.write[at] = slice.tree->get_transform(i);
 				cached->original_ids.write[at++] = i;
 			}
 		}
 		cached->tree.set_bounds(bounds);
 		cached->tree.set_transforms(transforms);
-		if (density_filtered) { cached->tree.set_density_membership(membership); }
 	}
 	cached->last_used_frame = current_frame;
 	cpu_timer.stop();
