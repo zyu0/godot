@@ -31,9 +31,9 @@
 #include "light_storage.h"
 
 #include "core/config/project_settings.h"
+#include "core/io/marshalls.h"
 #include "core/math/geometry_3d.h"
 #include "core/os/os.h"
-#include "core/io/marshalls.h"
 #include "servers/rendering/renderer_rd/environment/physical_sky_view.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
@@ -768,13 +768,17 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 					next_baked_depth.write[r_directional_light_count] = light->baked_depth;
 					MaterialStorage::store_transform(light->baked_world_to_light * p_camera_transform, light_data.baked_view_to_light);
 					MaterialStorage::store_transform(p_camera_transform, light_data.baked_view_to_world);
-					for (int j = 0; j < 3; j++) { light_data.baked_projection[j] = light->baked_projection[j]; }
+					for (int j = 0; j < 3; j++) {
+						light_data.baked_projection[j] = light->baked_projection[j];
+					}
 					light_data.baked_projection[3] = 1.0f / light->baked_resolution;
 					light_data.baked_coverage[0] = light->baked_coverage.position.x;
 					light_data.baked_coverage[1] = light->baked_coverage.position.y;
 					light_data.baked_coverage[2] = light->baked_coverage.size.x;
 					light_data.baked_coverage[3] = light->baked_coverage.size.y;
-					for (int j = 0; j < 4; j++) { light_data.baked_options[j] = light->baked_options[j]; }
+					for (int j = 0; j < 4; j++) {
+						light_data.baked_options[j] = light->baked_options[j];
+					}
 					if (texture_storage->owns_texture(light->baked_visibility)) {
 						RID visibility = texture_storage->texture_get_rd_texture(light->baked_visibility);
 						if (visibility.is_valid() && RD::get_singleton()->texture_is_valid(visibility)) {
@@ -2947,7 +2951,9 @@ bool LightStorage::light_directional_set_baked_shadow(RID p_light, const Ref<Ima
 	ERR_FAIL_COND_V(!light || light->type != RSE::LIGHT_DIRECTIONAL, false);
 	RD *rd = RD::get_singleton();
 	if (p_image.is_null()) {
-		if (light->baked_depth.is_valid()) { rd->free_rid(light->baked_depth); }
+		if (light->baked_depth.is_valid()) {
+			rd->free_rid(light->baked_depth);
+		}
 		light->baked_depth = RID();
 		return true;
 	}
@@ -2976,8 +2982,11 @@ bool LightStorage::light_directional_set_baked_shadow(RID p_light, const Ref<Ima
 	const uint8_t *in = source.ptr();
 	for (int i = 0; i < count; i++) {
 		const uint16_t depth = 65535 - ((uint16_t(in[2 * i]) << 8) | in[2 * i + 1]);
-		if (d16) { encode_uint16(depth, out + 2 * i); }
-		else { encode_float(float(depth) / 65535.0f, out + 4 * i); }
+		if (d16) {
+			encode_uint16(depth, out + 2 * i);
+		} else {
+			encode_float(float(depth) / 65535.0f, out + 4 * i);
+		}
 	}
 	// Depth aspect requires attachment usage; initial attachment data is forbidden.
 	RID replacement = rd->texture_create(format, RD::TextureView());
@@ -2993,8 +3002,12 @@ bool LightStorage::light_directional_set_baked_shadow(RID p_light, const Ref<Ima
 	light->baked_coverage = p_coverage;
 	light->baked_options = p_options;
 	light->baked_resolution = format.width;
-	if (previous.is_valid()) { rd->free_rid(previous); }
-	if (!d16) { WARN_PRINT("Baked directional shadow uses D32 fallback (4 bytes/texel)."); }
+	if (previous.is_valid()) {
+		rd->free_rid(previous);
+	}
+	if (!d16) {
+		WARN_PRINT("Baked directional shadow uses D32 fallback (4 bytes/texel).");
+	}
 	return true;
 }
 

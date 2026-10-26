@@ -265,8 +265,6 @@ public:
 	virtual AABB multimesh_get_aabb(RID p_multimesh) const = 0;
 
 	virtual void multimesh_set_custom_aabb(RID p_mesh, const AABB &p_aabb) = 0;
-	virtual void multimesh_set_shadow_culling_aabb(RID p_multimesh, const AABB &p_aabb) = 0;
-	bool is_shadow_instance_culling_supported() const;
 	virtual AABB multimesh_get_custom_aabb(RID p_mesh) const = 0;
 
 	virtual Transform3D multimesh_instance_get_transform(RID p_multimesh, int p_index) const = 0;
@@ -636,7 +634,6 @@ public:
 	virtual Dictionary sky_get_physical_source_status(RID p_sky) const = 0;
 	virtual Dictionary get_physical_sky_capabilities() const = 0;
 	virtual String get_sky_view_shader_source() const = 0;
-
 
 	virtual Ref<Image> sky_bake_panorama(RID p_sky, float p_energy, bool p_bake_irradiance, const Size2i &p_size) = 0;
 

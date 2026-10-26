@@ -30,8 +30,6 @@
 
 #pragma once
 
-#include "shadow_instance_tree.h"
-
 #include "core/templates/local_vector.h"
 #include "core/templates/rid_owner.h"
 #include "core/templates/self_list.h"
@@ -229,12 +227,6 @@ private:
 	/* MultiMesh */
 
 	struct MultiMesh {
-		ShadowInstanceTree shadow_culling;
-		// ID metadata follows all transform records, including both motion halves.
-		enum ShadowBoundsMode { SHADOW_BOUNDS_AUTO, SHADOW_BOUNDS_EXPLICIT, SHADOW_BOUNDS_DISABLED };
-		ShadowBoundsMode shadow_bounds_mode = SHADOW_BOUNDS_AUTO;
-		bool shadow_buffer_exposed = false;
-		Vector<Transform3D> shadow_auto_transforms;
 		RID mesh;
 		int instances = 0;
 		RSE::MultimeshTransformFormat xform_format = RSE::MULTIMESH_TRANSFORM_3D;
@@ -465,19 +457,8 @@ public:
 		return s->lod_count > 0;
 	}
 
-	_FORCE_INLINE_ uint32_t mesh_surface_get_lod_count(void *p_surface) const {
-		Mesh::Surface *s = reinterpret_cast<Mesh::Surface *>(p_surface);
-		return s->lod_count;
-	}
-
 	_FORCE_INLINE_ uint32_t mesh_surface_get_vertices_drawn_count(void *p_surface) const {
 		Mesh::Surface *s = reinterpret_cast<Mesh::Surface *>(p_surface);
-		return s->index_count ? s->index_count : s->vertex_count;
-	}
-
-	_FORCE_INLINE_ uint32_t mesh_surface_get_shadow_draw_count(void *p_surface, uint32_t p_lod) const {
-		Mesh::Surface *s = reinterpret_cast<Mesh::Surface *>(p_surface);
-		if (p_lod > 0 && p_lod <= s->lod_count) { return s->lods[p_lod - 1].index_count; }
 		return s->index_count ? s->index_count : s->vertex_count;
 	}
 
@@ -695,15 +676,12 @@ public:
 
 	virtual void _multimesh_set_buffer(RID p_multimesh, const Vector<float> &p_buffer) override;
 	virtual RID _multimesh_get_command_buffer_rd_rid(RID p_multimesh) const override;
-	virtual RID multimesh_get_buffer_rd_rid(RID p_multimesh) const override;
 	virtual RID _multimesh_get_buffer_rd_rid(RID p_multimesh) const override;
 	virtual Vector<float> _multimesh_get_buffer(RID p_multimesh) const override;
 
 	virtual void _multimesh_set_visible_instances(RID p_multimesh, int p_visible) override;
 	virtual int _multimesh_get_visible_instances(RID p_multimesh) const override;
 
-	void multimesh_set_shadow_culling_aabb(RID p_multimesh, const AABB &p_aabb) override;
-	ShadowInstanceTree *multimesh_get_shadow_culling(RID p_multimesh, bool p_allow_auto);
 	virtual void _multimesh_set_custom_aabb(RID p_multimesh, const AABB &p_aabb) override;
 	virtual AABB _multimesh_get_custom_aabb(RID p_multimesh) const override;
 

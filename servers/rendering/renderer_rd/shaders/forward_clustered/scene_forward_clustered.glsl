@@ -880,7 +880,6 @@ void main() {
 
 #include "scene_forward_clustered_inc.glsl"
 
-
 /* Varyings */
 
 layout(location = 0) in vec3 vertex_interp;
@@ -1082,8 +1081,8 @@ layout(location = 2) out vec2 motion_vector;
 #define SPECULAR_SCHLICK_GGX
 #endif
 
-#include "../scene_forward_lights_inc.glsl"
 #include "../baked_directional_shadow_inc.glsl"
+#include "../scene_forward_lights_inc.glsl"
 
 #include "../scene_forward_gi_inc.glsl"
 
@@ -1102,7 +1101,6 @@ vec4 volumetric_fog_process(vec2 screen_uv, float z) {
 	return texture(sampler3D(volumetric_fog_texture, SAMPLER_LINEAR_CLAMP), fog_pos);
 }
 
-
 #ifdef USE_RADIANCE_OCTMAP_ARRAY
 vec4 sample_sky_radiance(vec3 uv, float lod) {
 	vec4 old_sample = textureLod(sampler2DArray(radiance_octmap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), uv, lod);
@@ -1110,7 +1108,9 @@ vec4 sample_sky_radiance(vec3 uv, float lod) {
 vec4 sample_sky_radiance(vec2 uv, float lod) {
 	vec4 old_sample = textureLod(sampler2D(radiance_octmap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), uv, lod);
 #endif
-	if (scene_data_block.data.sky_capture_data.x == 0.0) { return old_sample; }
+	if (scene_data_block.data.sky_capture_data.x == 0.0) {
+		return old_sample;
+	}
 	vec3 old_rgb = scene_data_block.data.sky_capture_data.z > 0.0 ? old_sample.rgb : scene_data_block.data.sky_capture_fallback.rgb;
 	vec3 result = old_rgb;
 	if (scene_data_block.data.sky_capture_data.y > 0.0) {
@@ -2563,8 +2563,6 @@ void fragment_shader(in SceneData scene_data) {
 #ifdef USE_LIGHTMAP
 					}
 #endif
-
-
 
 #undef BIAS_FUNC
 				} // shadows

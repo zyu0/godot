@@ -18,10 +18,6 @@ layout(push_constant, std430) uniform DrawCall {
 	uint instance_index;
 	uint multimesh_motion_vectors_current_offset;
 	uint multimesh_motion_vectors_previous_offset;
-	uint shadow_instance_remap_base;
-	uint shadow_instance_original_id_base;
-	uint shadow_culling_padding_1;
-	uint shadow_culling_padding_2;
 #ifdef UBERSHADER
 	uint sc_packed_0;
 	uint sc_packed_1;

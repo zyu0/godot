@@ -2087,10 +2087,6 @@ String RenderingServer::get_current_rendering_driver_name() const {
 	return ::OS::get_singleton()->get_current_rendering_driver_name();
 }
 
-bool RenderingServer::is_shadow_instance_culling_supported() const {
-	return RenderingDevice::get_singleton() != nullptr && get_current_rendering_method() == "mobile";
-}
-
 String RenderingServer::get_current_rendering_method() const {
 	// Needs to remain in OS, since it's actually OS that interacts with it, but it's better exposed here.
 	return ::OS::get_singleton()->get_current_rendering_method();
@@ -2482,8 +2478,6 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("multimesh_get_mesh", "multimesh"), &RenderingServer::multimesh_get_mesh);
 	ClassDB::bind_method(D_METHOD("multimesh_get_aabb", "multimesh"), &RenderingServer::multimesh_get_aabb);
 	ClassDB::bind_method(D_METHOD("multimesh_set_custom_aabb", "multimesh", "aabb"), &RenderingServer::multimesh_set_custom_aabb);
-	ClassDB::bind_method(D_METHOD("multimesh_set_shadow_culling_aabb", "multimesh", "instance_local_aabb"), &RenderingServer::multimesh_set_shadow_culling_aabb);
-	ClassDB::bind_method(D_METHOD("is_shadow_instance_culling_supported"), &RenderingServer::is_shadow_instance_culling_supported);
 	ClassDB::bind_method(D_METHOD("multimesh_get_custom_aabb", "multimesh"), &RenderingServer::multimesh_get_custom_aabb);
 	ClassDB::bind_method(D_METHOD("multimesh_instance_get_transform", "multimesh", "index"), &RenderingServer::multimesh_instance_get_transform);
 	ClassDB::bind_method(D_METHOD("multimesh_instance_get_transform_2d", "multimesh", "index"), &RenderingServer::multimesh_instance_get_transform_2d);

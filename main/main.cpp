@@ -2487,12 +2487,6 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 	}
 
 	// Start with RenderingDevice-based backends.
-	// Headless GPU rendering is explicit; ordinary CLI/server headless runs
-	// must not inherit the project's desktop GPU driver.
-	if (display_driver == NULL_DISPLAY_DRIVER && rendering_driver.is_empty()) {
-		rendering_driver = "dummy";
-		rendering_method = "dummy";
-	}
 #ifdef RD_ENABLED
 	renderer_hints = "forward_plus,mobile";
 	default_renderer_mobile = "mobile";
@@ -3372,7 +3366,7 @@ Error Main::setup2(bool p_show_boot_logo) {
 
 		String rendering_driver = OS::get_singleton()->get_current_rendering_driver_name();
 		display_server = DisplayServer::create(display_driver_idx, rendering_driver, window_mode, window_vsync_mode, window_flags, window_position, window_size, init_screen, context, init_embed_parent_window_id, err);
-		if ((err != OK || display_server == nullptr) && DisplayServer::get_create_function_name(display_driver_idx) != NULL_DISPLAY_DRIVER) {
+		if (err != OK || display_server == nullptr) {
 			String last_name = DisplayServer::get_create_function_name(display_driver_idx);
 
 			// We can't use this display server, try other ones as fallback.
@@ -3977,9 +3971,7 @@ void Main::setup_boot_logo() {
 		boot_bg_color = GLOBAL_DEF_BASIC("application/boot_splash/bg_color", (editor || project_manager) ? boot_splash_editor_bg_color : boot_splash_bg_color);
 #endif
 		if (boot_logo.is_valid()) {
-			if (DisplayServer::get_singleton()->get_name() != NULL_DISPLAY_DRIVER) {
-				RenderingServer::get_singleton()->set_boot_image_with_stretch(boot_logo, boot_bg_color, boot_stretch_mode, boot_logo_filter);
-			}
+			RenderingServer::get_singleton()->set_boot_image_with_stretch(boot_logo, boot_bg_color, boot_stretch_mode, boot_logo_filter);
 
 		} else {
 #ifndef NO_DEFAULT_BOOT_LOGO
@@ -3993,9 +3985,7 @@ void Main::setup_boot_logo() {
 			MAIN_PRINT("Main: ClearColor");
 			RenderingServer::get_singleton()->set_default_clear_color(boot_bg_color);
 			MAIN_PRINT("Main: Image");
-			if (DisplayServer::get_singleton()->get_name() != NULL_DISPLAY_DRIVER) {
-				RenderingServer::get_singleton()->set_boot_image_with_stretch(splash, boot_bg_color, RSE::SPLASH_STRETCH_MODE_DISABLED);
-			}
+			RenderingServer::get_singleton()->set_boot_image_with_stretch(splash, boot_bg_color, RSE::SPLASH_STRETCH_MODE_DISABLED);
 #endif
 		}
 

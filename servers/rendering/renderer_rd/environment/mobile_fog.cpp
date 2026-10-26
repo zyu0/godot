@@ -96,18 +96,16 @@ bool MobileFog::prepare(const RenderDataRD *p_data, bool p_requested, RID p_radi
 	}
 	return true;
 }
-RID MobileFog::get_framebuffer(Ref<RenderSceneBuffersRD> rb, bool p_resolve_depth, bool p_resolve_color) {
+RID MobileFog::get_framebuffer(Ref<RenderSceneBuffersRD> rb, bool p_resolve_depth) {
 	bool msaa = rb->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED;
 	Vector<RID> textures;
 	textures.push_back(msaa ? rb->get_color_msaa() : rb->get_internal_texture());
 	textures.push_back(msaa ? rb->get_depth_msaa() : rb->get_depth_texture());
 	textures.push_back(rb->get_texture(SNAME("mobile_fog"), SNAME("mask")));
-	if (msaa && p_resolve_color) {
+	if (msaa) {
 		textures.push_back(rb->get_internal_texture());
 	}
-	int depth_resolve_attachment = -1;
 	if (msaa && p_resolve_depth) {
-		depth_resolve_attachment = textures.size();
 		textures.push_back(rb->get_depth_texture());
 	}
 	Vector<RD::FramebufferPass> passes;
@@ -119,11 +117,11 @@ RID MobileFog::get_framebuffer(Ref<RenderSceneBuffersRD> rb, bool p_resolve_dept
 	RD::FramebufferPass sky;
 	sky.color_attachments.push_back(0);
 	sky.depth_attachment = 1;
-	if (msaa && p_resolve_color) {
+	if (msaa) {
 		sky.resolve_attachments.push_back(3);
-	}
-	if (depth_resolve_attachment >= 0) {
-		sky.depth_resolve_attachment = depth_resolve_attachment;
+		if (p_resolve_depth) {
+			sky.depth_resolve_attachment = 4;
+		}
 	}
 	passes.push_back(sky);
 	return FramebufferCacheRD::get_singleton()->get_cache_multipass(textures, passes, rb->get_view_count());

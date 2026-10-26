@@ -11,7 +11,8 @@ float sample_baked_directional_shadow(uint index, vec3 view_position, uint layer
 		return 1.0;
 	}
 	float blend = light.baked_options.w > light.baked_options.z
-			? smoothstep(light.baked_options.z, light.baked_options.w, -view_position.z) : 1.0;
+			? smoothstep(light.baked_options.z, light.baked_options.w, -view_position.z)
+			: 1.0;
 	if (blend == 0.0) {
 		return 1.0;
 	}

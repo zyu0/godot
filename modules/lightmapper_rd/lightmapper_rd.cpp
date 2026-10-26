@@ -1729,7 +1729,6 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 			}
 		}
 
-
 		/* UNOCCLUDE */
 		{
 			Vector<RD::Uniform> uniforms;
@@ -1766,13 +1765,13 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 			rd->compute_list_end(); //done
 		}
 
-	#ifdef DEBUG_TEXTURES
+#ifdef DEBUG_TEXTURES
 		for (int i = 0; i < atlas_slices; i++) {
 			Vector<uint8_t> s = rd->texture_get_data(unocclude_tex, i);
 			Ref<Image> img = Image::create_from_data(atlas_size.width, atlas_size.height, false, Image::FORMAT_RGBAF, s);
 			img->save_exr("res://1_unocclude_" + itos(i) + ".exr", false);
 		}
-	#endif
+#endif
 
 		if (p_step_function) {
 			if (p_step_function(0.5, RTR("Plot direct lighting"), p_bake_userdata, true)) {
@@ -1917,7 +1916,7 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 			}
 		}
 
-	#ifdef DEBUG_TEXTURES
+#ifdef DEBUG_TEXTURES
 
 		for (int i = 0; i < atlas_slices; i++) {
 			Vector<uint8_t> s = rd->texture_get_data(light_source_tex, i);
@@ -1932,7 +1931,7 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 				img->save_exr("res://2_light_primary_accum_" + itos(i) + ".exr", false);
 			}
 		}
-	#endif
+#endif
 
 		/* SECONDARY (indirect) LIGHT PASS(ES) */
 
@@ -2065,7 +2064,6 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 				}
 			}
 		}
-
 	}
 
 	/* LIGHTPROBES */
@@ -2195,11 +2193,12 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 		FREE_RASTER_RESOURCES
 		FREE_COMPUTE_RESOURCES
 		memdelete(rd);
-		if (rcd != nullptr) { memdelete(rcd); }
+		if (rcd != nullptr) {
+			memdelete(rcd);
+		}
 		print_line(vformat("SH_PROBE_ONLY_COMPLETE probes=%d textures=0", probe_positions.size()));
 		return BAKE_OK;
 	}
-
 
 #if 0
 	for (int i = 0; i < probe_positions.size(); i++) {

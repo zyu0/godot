@@ -436,7 +436,6 @@ public:
 	FUNC3(multimesh_instance_set_custom_data, RID, int, const Color &)
 
 	FUNC2(multimesh_set_custom_aabb, RID, const AABB &)
-	FUNC2(multimesh_set_shadow_culling_aabb, RID, const AABB &)
 	FUNC1RC(AABB, multimesh_get_custom_aabb, RID)
 
 	FUNC1RC(RID, multimesh_get_mesh, RID)

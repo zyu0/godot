@@ -309,8 +309,6 @@ public:
 		RID light;
 		int pass = 0;
 		PagedArray<RenderGeometryInstance *> instances;
-		Vector<Plane> caster_cull_planes; // Owned world-space directional receiver volume.
-		Rect2 directional_receiver_rect;
 	};
 
 	struct RenderSDFGIData {

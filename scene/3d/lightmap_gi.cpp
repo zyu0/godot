@@ -55,8 +55,6 @@
 #include "servers/display/display_server.h"
 #endif
 
-
-
 void LightmapGIData::add_user(const NodePath &p_path, const Rect2 &p_uv_scale, int p_slice_index, int32_t p_sub_instance) {
 	User user;
 	user.path = p_path;
@@ -1093,8 +1091,7 @@ LightmapGI::BakeError LightmapGI::bake_probe_field_from_scene(Node *p_from_node,
 LightmapGI::BakeError LightmapGI::_bake_from_scene(Node *p_from_node, const String &p_image_data_path, bool p_probes_only, bool p_probe_field_only) {
 	return bake(p_from_node, p_image_data_path, [](float p_completion, const String &p_text, void *, bool) {
 		print_line(vformat("LIGHTMAP_NATIVE_BAKE %0.1f%% %s", p_completion * 100.0f, p_text));
-		return false;
-	}, nullptr, p_probes_only, p_probe_field_only);
+		return false; }, nullptr, p_probes_only, p_probe_field_only);
 }
 
 LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_path, Lightmapper::BakeStepFunc p_bake_step, void *p_bake_userdata, bool p_probes_only, bool p_probe_field_only) {

@@ -2184,12 +2184,6 @@
 				[b]Warning:[/b] This function is primarily intended for editor usage. For in-game use cases, prefer physics collision.
 			</description>
 		</method>
-		<method name="is_shadow_instance_culling_supported" qualifiers="const">
-			<return type="bool" />
-			<description>
-				Returns whether this renderer supports opt-in per-instance directional shadow culling. Currently supported by the Mobile renderer with a RenderingDevice backend. This capability does not guarantee that an individual MultiMesh or shader is eligible.
-			</description>
-		</method>
 		<method name="is_on_render_thread">
 			<return type="bool" />
 			<description>
@@ -2320,7 +2314,7 @@
 			<param index="4" name="coverage" type="Rect2" />
 			<param index="5" name="options" type="Vector4" />
 			<description>
-				Binds a fixed directional shadow source to native RD lighting. [param image] is a square, unmipped RG8 image encoding unsigned 16-bit depth (R high byte, G low byte). [param projection] contains orthographic width, near distance and depth span. [param coverage] is a world XZ rectangle. [param options] contains nonnegative bias in metres, filter radius in texels (0 to 8), and hybrid fade start/end in view metres (equal values disable fading). Radius zero uses one bilinear comparison; positive radius uses four. The light must have shadows enabled. Returns [code]false[/code] for invalid inputs or unsupported backends without replacing the old source. Passing [code]null[/code] clears it. Native shadowmask receivers retain their existing shadowmask behavior. Custom [code]light()[/code] shaders must consume [code]ATTENUATION[/code] to receive shadows.
+				Binds a fixed directional shadow source to native RD lighting. [param image] is a square, unmipped RG8 image encoding unsigned 16-bit depth (R high byte, G low byte). [param projection] contains orthographic width, near distance and depth span. [param coverage] is a world XZ rectangle. [param options] contains nonnegative bias in meters, filter radius in texels (0 to 8), and hybrid fade start/end in view meters (equal values disable fading). Radius zero uses one bilinear comparison; positive radius uses four. The light must have shadows enabled. Returns [code]false[/code] for invalid inputs or unsupported backends without replacing the old source. Passing [code]null[/code] clears it. Native shadowmask receivers retain their existing shadowmask behavior. Custom [code skip-lint]light()[/code] shaders must consume [code]ATTENUATION[/code] to receive shadows.
 			</description>
 		</method>
 		<method name="light_directional_set_baked_visibility">
@@ -3032,16 +3026,6 @@
 			<param index="1" name="mesh" type="RID" />
 			<description>
 				Sets the mesh to be drawn by the multimesh. Equivalent to [member MultiMesh.mesh].
-			</description>
-		</method>
-		<method name="multimesh_set_shadow_culling_aabb">
-			<return type="void" />
-			<param index="0" name="multimesh" type="RID" />
-			<param index="1" name="aabb" type="AABB" />
-			<description>
-				Opts a CPU-owned 3D MultiMesh into per-instance directional shadow culling using a mesh-local bound that encloses every vertex position, including all shader deformation. A default-constructed [AABB] disables the feature. Other bounds require finite coordinates and strictly positive extents.
-				Activation requires a complete CPU transform snapshot. If no retained snapshot exists, perform a full [method multimesh_set_buffer] upload after enabling. Allocation or mesh replacement clears the opt-in. Direct external RenderingDevice writes are not tracked: disable culling before using such writes.
-				The renderer conservatively expands aggregate bounds and preserves instance IDs, colors and custom data. Unsupported renderers, indirect sources, 2D instances and shaders with custom position/projection, world-space or skip-vertex-transform modes retain ordinary drawing. Entirely contained batches also retain direct drawing. See [method is_shadow_instance_culling_supported].
 			</description>
 		</method>
 		<method name="multimesh_set_physics_interpolated">

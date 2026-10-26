@@ -68,7 +68,7 @@ private:
 		Transform3D baked_world_to_light;
 		Vector3 baked_projection;
 		Rect2 baked_coverage;
-		Vector4 baked_options; // bias metres, radius texels, hybrid start/end metres.
+		Vector4 baked_options; // bias meters, radius texels, hybrid start/end meters.
 		uint32_t baked_receiver_mask = 0;
 		uint32_t baked_resolution = 0;
 		bool shadow = false;
