@@ -77,22 +77,29 @@ Ref<Image> Texture2DRD::get_image() const {
 
 void Texture2DRD::set_texture_rd_rid(RID p_texture_rd_rid) {
 	ERR_FAIL_NULL(RS::get_singleton());
-
-	if (p_texture_rd_rid.is_valid()) {
-		RS::get_singleton()->call_on_render_thread(callable_mp(this, &Texture2DRD::_set_texture_rd_rid).bind(p_texture_rd_rid));
-	} else if (texture_rid.is_valid()) {
-		RS::get_singleton()->free_rid(texture_rid);
-		texture_rid = RID();
-		size = Size2i();
-
-		notify_property_list_changed();
-		emit_changed();
-	}
+	// Keep this resource alive until the queued bind or clear has executed.
+	RS::get_singleton()->call_on_render_thread(callable_mp(this, &Texture2DRD::_set_texture_rd_rid).bind(p_texture_rd_rid, Ref<Texture2DRD>(this)));
 }
 
-void Texture2DRD::_set_texture_rd_rid(RID p_texture_rd_rid) {
+void Texture2DRD::_set_texture_rd_rid(RID p_texture_rd_rid, const Ref<Texture2DRD> &) {
+	if (p_texture_rd_rid.is_null()) {
+		if (texture_rid.is_valid()) {
+			RS::get_singleton()->free_rid(texture_rid);
+			texture_rid = RID();
+			texture_rd_rid = RID();
+			size = Size2i();
+			notify_property_list_changed();
+			emit_changed();
+		}
+		return;
+	}
 	ERR_FAIL_NULL(RD::get_singleton());
 	ERR_FAIL_COND(!RD::get_singleton()->texture_is_valid(p_texture_rd_rid));
+	// Check on the render thread, after earlier queued binds have executed.
+	// Updating image contents does not replace its RD texture identity.
+	if (texture_rid.is_valid() && texture_rd_rid == p_texture_rd_rid) {
+		return;
+	}
 
 	RD::TextureFormat tf = RD::get_singleton()->texture_get_format(p_texture_rd_rid);
 	ERR_FAIL_COND(tf.texture_type != RD::TEXTURE_TYPE_2D);

@@ -46,7 +46,7 @@ jobs:
             godot-cpp: true
             clangd-tidy: true
 
-          - name: Editor with doubles and GCC sanitizers (target=editor, dev_build=yes, scu_build=yes, precision=double, use_asan=yes, use_ubsan=yes, linker=mold)
+          - name: Editor with doubles and GCC sanitizers (target=editor, dev_build=yes, scu_build=yes, precision=double, use_asan=yes, use_ubsan=yes, linker=lld)
             cache-name: linux-editor-double-sanitizers
             target: editor
             # Debug symbols disabled as they're huge on this build and we hit the 14 GB limit for runners.
@@ -57,7 +57,8 @@ jobs:
               precision=double
               use_asan=yes
               use_ubsan=yes
-              linker=mold
+              linker=lld
+              linkflags=-Wl,--gc-sections,-Map=bin/godot-double.map
             bin: ./bin/godot.linuxbsd.editor.dev.double.x86_64.san
             proj-test: true
             free-space: true
@@ -179,11 +180,17 @@ jobs:
             echo "ACCESSKIT_ENABLED=no" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Install mold linker
-        if: matrix.proj-test
-        uses: rui314/setup-mold@v1
+      - name: Check GCC and LLD
+        if: matrix.cache-name == 'linux-editor-double-sanitizers'
+        run: |
+          if ! command -v ld.lld > /dev/null 2>&1; then
+            sudo apt-get install --yes lld
+          fi
+          g++ --version
+          ld.lld --version
 
       - name: Compilation
+        id: compilation
         uses: ./.github/actions/godot-build
         with:
           scons-flags: ${{ env.SCONS_FLAGS }} ${{ matrix.scons-flags }} accesskit=${{ steps.accesskit-sdk.outputs.ACCESSKIT_ENABLED }}
@@ -205,9 +212,18 @@ jobs:
           godot-cpp-branch: ${{ env.GODOT_CPP_BRANCH }}
 
       - name: Save Godot build cache
+        if: ${{ !cancelled() && (success() || (matrix.cache-name == 'linux-editor-double-sanitizers' && steps.compilation.outcome == 'failure')) }}
         uses: ./.github/actions/godot-cache-save
         with:
           cache-name: ${{ matrix.cache-name }}
+        continue-on-error: true
+
+      - name: Upload double-sanitizer link map
+        if: ${{ !cancelled() && matrix.cache-name == 'linux-editor-double-sanitizers' }}
+        uses: ./.github/actions/upload-artifact
+        with:
+          name: linux-editor-double-link-map
+          path: bin/godot-double.map
         continue-on-error: true
 
       - name: Generate C# glue
@@ -239,6 +255,15 @@ jobs:
           ${{ matrix.bin }} --version
           ${{ matrix.bin }} --help
           ${{ matrix.bin }} --headless --test --force-colors
+
+      - name: Soft-body regression with extended fixture
+        if: matrix.cache-name == 'linux-editor-double-sanitizers'
+        env:
+          ASAN_OPTIONS: ${{ env.ASAN_OPTIONS }}:halt_on_error=1
+          # Keep the full suite's UBSan recovery policy and retain diagnostics.
+          UBSAN_OPTIONS: ${{ env.UBSAN_OPTIONS }}:print_stacktrace=1
+        run: |
+          ${{ matrix.bin }} --headless --test '--test-suite=[JoltSoftBody*]' --no-skip --order-by=rand --rand-seed=158
 
       - name: .NET source generators tests
         if: matrix.build-mono

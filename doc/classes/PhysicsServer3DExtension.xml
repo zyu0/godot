@@ -1060,6 +1060,19 @@
 			<description>
 			</description>
 		</method>
+		<method name="_soft_body_get_extra_property" qualifiers="virtual required const">
+			<return type="Variant" />
+			<param index="0" name="body" type="RID" />
+			<param index="1" name="name" type="StringName" />
+			<description>
+			</description>
+		</method>
+		<method name="_soft_body_get_extra_property_list" qualifiers="virtual required const">
+			<return type="Dictionary[]" />
+			<param index="0" name="body" type="RID" />
+			<description>
+			</description>
+		</method>
 		<method name="_soft_body_get_linear_stiffness" qualifiers="virtual required const">
 			<return type="float" />
 			<param index="0" name="body" type="RID" />
@@ -1171,6 +1184,14 @@
 			<return type="void" />
 			<param index="0" name="body" type="RID" />
 			<param index="1" name="drag_coefficient" type="float" />
+			<description>
+			</description>
+		</method>
+		<method name="_soft_body_set_extra_property" qualifiers="virtual required">
+			<return type="bool" />
+			<param index="0" name="body" type="RID" />
+			<param index="1" name="name" type="StringName" />
+			<param index="2" name="value" type="Variant" />
 			<description>
 			</description>
 		</method>

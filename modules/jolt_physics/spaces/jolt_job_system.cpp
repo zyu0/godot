@@ -163,6 +163,13 @@ JoltJobSystem::JoltJobSystem() :
 	jobs.Init(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsJobs);
 }
 
+JoltJobSystem::~JoltJobSystem() {
+	// completed_head is process-global, but jobs belongs to this instance.
+	// Reclaim before destruction to prevent foreign pointers corrupting the next
+	// instance's free list and causing invalid task IDs or infinite reclaim loops.
+	_reclaim_jobs();
+}
+
 void JoltJobSystem::pre_step() {
 	// Nothing to do.
 }
@@ -177,11 +184,24 @@ void JoltJobSystem::flush_timings() {
 	const StringName profiler_name = SNAME("servers");
 
 	EngineDebugger *engine_debugger = EngineDebugger::get_singleton();
+	const bool profiling = engine_debugger->is_profiling(profiler_name);
+	HashMap<const void *, uint64_t> timings_snapshot;
 
-	if (engine_debugger->is_profiling(profiler_name)) {
+	// Jobs may still be recording their timings after the physics barrier completes.
+	// Snapshot and reset under the writers' lock, then report outside the lock.
+	timings_lock.lock();
+	if (profiling) {
+		timings_snapshot = timings_by_job;
+	}
+	for (KeyValue<const void *, uint64_t> &E : timings_by_job) {
+		E.value = 0;
+	}
+	timings_lock.unlock();
+
+	if (profiling) {
 		Array timings;
 
-		for (const KeyValue<const void *, uint64_t> &E : timings_by_job) {
+		for (const KeyValue<const void *, uint64_t> &E : timings_snapshot) {
 			timings.push_back(static_cast<const char *>(E.key));
 			timings.push_back(USEC_TO_SEC(E.value));
 		}
@@ -189,10 +209,6 @@ void JoltJobSystem::flush_timings() {
 		timings.push_front("physics_3d");
 
 		engine_debugger->profiler_add_frame_data(profiler_name, timings);
-	}
-
-	for (KeyValue<const void *, uint64_t> &E : timings_by_job) {
-		E.value = 0;
 	}
 }
 

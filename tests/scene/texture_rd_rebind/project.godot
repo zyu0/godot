@@ -1,0 +1,7 @@
+config_version=5
+[application]
+config/name="Texture2DRD rebind regression"
+[display]
+window/size/no_focus=true
+[rendering]
+renderer/rendering_method="mobile"

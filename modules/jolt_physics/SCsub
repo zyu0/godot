@@ -168,11 +168,19 @@ env.modules_sources += thirdparty_obj
 module_obj = []
 
 env_jolt.add_source_files(module_obj, "*.cpp")
+env_jolt.add_source_files(module_obj, "capabilities/*.cpp")
 env_jolt.add_source_files(module_obj, "joints/*.cpp")
 env_jolt.add_source_files(module_obj, "misc/*.cpp")
 env_jolt.add_source_files(module_obj, "objects/*.cpp")
 env_jolt.add_source_files(module_obj, "shapes/*.cpp")
 env_jolt.add_source_files(module_obj, "spaces/*.cpp")
+
+if env["tests"]:
+    # Compile Jolt-dependent probes here. The bare-env doctest TU must include
+    # neither Jolt headers nor TESTS_ENABLED-guarded declarations.
+    env_jolt.Append(CPPDEFINES=["TESTS_ENABLED"])
+    env_jolt.add_source_files(module_obj, "tests/*.cpp")
+
 env.modules_sources += module_obj
 
 # Needed to force rebuilding the module files when the thirdparty library is updated.

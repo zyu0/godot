@@ -64,6 +64,7 @@ class JoltSpace3D {
 
 	LocalVector<JPH::BodyID> pending_objects_sleeping;
 	LocalVector<JPH::BodyID> pending_objects_awake;
+	LocalVector<JoltSoftBody3D *> faulted_soft_bodies;
 
 	RID rid;
 
@@ -82,6 +83,9 @@ class JoltSpace3D {
 
 	bool active = false;
 	bool stepping = false;
+#ifdef TESTS_ENABLED
+	bool walking_soft_bodies_for_tests = false;
+#endif
 
 	void _pre_step(float p_step);
 	void _post_step(float p_step);
@@ -91,6 +95,7 @@ public:
 	~JoltSpace3D();
 
 	void step(float p_step);
+	void enqueue_faulted_soft_body(JoltSoftBody3D *p_body) { faulted_soft_bodies.push_back(p_body); }
 
 	void call_queries();
 

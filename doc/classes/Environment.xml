@@ -18,11 +18,23 @@
 		<link title="Third Person Shooter (TPS) Demo">https://godotengine.org/asset-library/asset/2710</link>
 	</tutorials>
 	<methods>
+		<method name="get_aerial_perspective_status" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Returns effective native state, view readiness and resource counters.
+			</description>
+		</method>
 		<method name="get_glow_level" qualifiers="const">
 			<return type="float" />
 			<param index="0" name="idx" type="int" />
 			<description>
 				Returns the intensity of the glow level [param idx].
+			</description>
+		</method>
+		<method name="get_height_fog_status" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Returns native analytic height fog support and execution status.
 			</description>
 		</method>
 		<method name="set_glow_level">
@@ -32,30 +44,6 @@
 			<description>
 				Sets the intensity of the glow level [param idx]. A value above [code]0.0[/code] enables the level. Each level relies on the previous level. This means that enabling higher glow levels will slow down the glow effect rendering, even if previous levels aren't enabled.
 			</description>
-		</method>
-
-		<method name="set_height_fog_state">
-			<return type="void" />
-			<param index="0" name="state" type="Dictionary" />
-			<description>Submits the complete native analytic height fog state. See [method RenderingServer.environment_set_height_fog_state].</description>
-		</method>
-		<method name="get_height_fog_state" qualifiers="const">
-			<return type="Dictionary" />
-			<description>Returns the accepted native height fog payload.</description>
-		</method>
-		<method name="get_height_fog_status" qualifiers="const">
-			<return type="Dictionary" />
-			<description>Returns native analytic height fog support and execution status.</description>
-		</method>
-		<method name="set_aerial_perspective_state">
-			<return type="void" /><param index="0" name="state" type="Dictionary" />
-			<description>Sets the atomic native Mobile aerial-perspective payload; see [method RenderingServer.environment_set_aerial_perspective_state].</description>
-		</method>
-		<method name="get_aerial_perspective_state" qualifiers="const">
-			<return type="Dictionary" /><description>Returns the last accepted native aerial-perspective payload.</description>
-		</method>
-		<method name="get_aerial_perspective_status" qualifiers="const">
-			<return type="Dictionary" /><description>Returns effective native state, view readiness and resource counters.</description>
 		</method>
 	</methods>
 	<members>
@@ -74,6 +62,9 @@
 		</member>
 		<member name="adjustment_saturation" type="float" setter="set_adjustment_saturation" getter="get_adjustment_saturation" default="1.0">
 			Applies a simple saturation adjustment to the rendered image after tonemaping. When [member adjustment_saturation] is set to [code]0.0[/code], the rendered image will be fully converted to a grayscale image. Effective only if [member adjustment_enabled] is [code]true[/code].
+		</member>
+		<member name="aerial_perspective_state" type="Dictionary" setter="set_aerial_perspective_state" getter="get_aerial_perspective_state" default="{}">
+			Serialized native Mobile finite-atmosphere snapshot. This transport is separate from device quality policy and height fog. Capturing the infinite sky does not allocate finite AP volumes.
 		</member>
 		<member name="ambient_light_color" type="Color" setter="set_ambient_light_color" getter="get_ambient_light_color" default="Color(0, 0, 0, 1)">
 			The ambient light's [Color]. Only effective if [member ambient_light_sky_contribution] is lower than [code]1.0[/code] (exclusive).
@@ -223,6 +214,9 @@
 		<member name="glow_strength" type="float" setter="set_glow_strength" getter="get_glow_strength" default="1.0">
 			The strength that is used when blurring across the screen to generate the glow effect. This affects the distance and intensity of the blur. When using the Mobile rendering method, this should be increased to compensate for the lower dynamic range.
 			[b]Note:[/b] [member glow_strength] has no effect when using the Compatibility rendering method, due to this rendering method using a simpler glow implementation optimized for low-end devices.
+		</member>
+		<member name="height_fog_state" type="Dictionary" setter="set_height_fog_state" getter="get_height_fog_state" default="{}">
+			Complete native analytic height fog transport. Stored on duplication for immutable capture snapshots.
 		</member>
 		<member name="reflected_light_source" type="int" setter="set_reflection_source" getter="get_reflection_source" enum="Environment.ReflectionSource" default="0">
 			The reflected (specular) light source.
@@ -404,10 +398,6 @@
 		</member>
 		<member name="volumetric_fog_temporal_reprojection_enabled" type="bool" setter="set_volumetric_fog_temporal_reprojection_enabled" getter="is_volumetric_fog_temporal_reprojection_enabled" default="true">
 			Enables temporal reprojection in the volumetric fog. Temporal reprojection blends the current frame's volumetric fog with the last frame's volumetric fog to smooth out jagged edges. The performance cost is minimal; however, it leads to moving [FogVolume]s and [Light3D]s "ghosting" and leaving a trail behind them. When temporal reprojection is enabled, try to avoid moving [FogVolume]s or [Light3D]s too fast. Short-lived dynamic lighting effects should have [member Light3D.light_volumetric_fog_energy] set to [code]0.0[/code] to avoid ghosting.
-		</member>
-		<member name="height_fog_state" type="Dictionary" setter="set_height_fog_state" getter="get_height_fog_state" default="{}">Complete native analytic height fog transport. Stored on duplication for immutable capture snapshots.</member>
-		<member name="aerial_perspective_state" type="Dictionary" setter="set_aerial_perspective_state" getter="get_aerial_perspective_state" default="{}">
-			Serialized native Mobile finite-atmosphere snapshot. This transport is separate from device quality policy and height fog. Capturing the infinite sky does not allocate finite AP volumes.
 		</member>
 	</members>
 	<constants>

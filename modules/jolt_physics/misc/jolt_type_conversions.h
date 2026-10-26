@@ -42,6 +42,7 @@
 #include <Jolt/Core/Color.h>
 #include <Jolt/Geometry/AABox.h>
 #include <Jolt/Geometry/Plane.h>
+#include <Jolt/Math/DMat44.h>
 #include <Jolt/Math/Mat44.h>
 #include <Jolt/Math/Quat.h>
 #include <Jolt/Math/Vec3.h>
@@ -64,6 +65,12 @@ _FORCE_INLINE_ Transform3D to_godot(const JPH::Mat44 &p_mat) {
 			Vector3(p_mat(0, 1), p_mat(1, 1), p_mat(2, 1)),
 			Vector3(p_mat(0, 2), p_mat(1, 2), p_mat(2, 2)),
 			Vector3(p_mat(0, 3), p_mat(1, 3), p_mat(2, 3)));
+}
+
+_FORCE_INLINE_ Transform3D to_godot(const JPH::DMat44 &p_mat) {
+	Transform3D transform = to_godot(p_mat.GetRotation());
+	transform.origin = to_godot(p_mat.GetTranslation());
+	return transform;
 }
 
 _FORCE_INLINE_ Color to_godot(const JPH::Color &p_color) {

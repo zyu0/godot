@@ -64,12 +64,20 @@ constexpr TValue align_up(TValue p_value, TAlignment p_alignment) {
 } //namespace
 
 JoltTempAllocator::JoltTempAllocator() :
-		capacity((uint64_t)JoltProjectSettings::temp_memory_b),
-		base(static_cast<uint8_t *>(JPH::Allocate((size_t)capacity))) {
+		capacity((uint64_t)JoltProjectSettings::temp_memory_b) {
+	if constexpr (needs_aligned_allocate) {
+		base = static_cast<uint8_t *>(JPH::AlignedAllocate((size_t)capacity, JPH_RVECTOR_ALIGNMENT));
+	} else {
+		base = static_cast<uint8_t *>(JPH::Allocate((size_t)capacity));
+	}
 }
 
 JoltTempAllocator::~JoltTempAllocator() {
-	JPH::Free(base);
+	if constexpr (needs_aligned_allocate) {
+		JPH::AlignedFree(base);
+	} else {
+		JPH::Free(base);
+	}
 }
 
 void *JoltTempAllocator::Allocate(uint32_t p_size) {
@@ -77,7 +85,7 @@ void *JoltTempAllocator::Allocate(uint32_t p_size) {
 		return nullptr;
 	}
 
-	p_size = align_up(p_size, 16U);
+	p_size = align_up(p_size, uint32_t(JPH_RVECTOR_ALIGNMENT));
 
 	const uint64_t new_top = top + p_size;
 
@@ -91,7 +99,11 @@ void *JoltTempAllocator::Allocate(uint32_t p_size) {
 								"Consider increasing maximum temporary memory in project settings.",
 				JoltProjectSettings::temp_memory_mib));
 
-		ptr = JPH::Allocate(p_size);
+		if constexpr (needs_aligned_allocate) {
+			ptr = JPH::AlignedAllocate(p_size, JPH_RVECTOR_ALIGNMENT);
+		} else {
+			ptr = JPH::Allocate(p_size);
+		}
 	}
 
 	top = new_top;
@@ -104,7 +116,7 @@ void JoltTempAllocator::Free(void *p_ptr, uint32_t p_size) {
 		return;
 	}
 
-	p_size = align_up(p_size, 16U);
+	p_size = align_up(p_size, uint32_t(JPH_RVECTOR_ALIGNMENT));
 
 	const uint64_t new_top = top - p_size;
 
@@ -113,7 +125,11 @@ void JoltTempAllocator::Free(void *p_ptr, uint32_t p_size) {
 			CRASH_NOW_MSG("Jolt Physics temporary memory was freed in the wrong order.");
 		}
 	} else {
-		JPH::Free(p_ptr);
+		if constexpr (needs_aligned_allocate) {
+			JPH::AlignedFree(p_ptr);
+		} else {
+			JPH::Free(p_ptr);
+		}
 	}
 
 	top = new_top;

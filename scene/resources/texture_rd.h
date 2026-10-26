@@ -60,7 +60,7 @@ public:
 	RID get_texture_rd_rid() const;
 
 	// Internal function that should only be called from the rendering thread.
-	void _set_texture_rd_rid(RID p_texture_rd_rid);
+	void _set_texture_rd_rid(RID p_texture_rd_rid, const Ref<Texture2DRD> &p_keepalive);
 
 	Texture2DRD();
 	~Texture2DRD();
