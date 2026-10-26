@@ -1618,16 +1618,16 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 	if (p_probe_field_only) {
 		// A field consumer supplies its own interpolation. Do not construct or
 		// publish incomplete native capture data merely to transport raw SH.
-		Dictionary data;
-		data["points"] = Vector<Vector3>(probe_points);
-		data["sh"] = Vector<Color>(probe_sh);
-		data["bounds"] = bounds;
-		data["interior"] = interior;
-		data["baked_exposure"] = exposure_normalization;
+		Dictionary probe_data;
+		probe_data["points"] = Vector<Vector3>(probe_points);
+		probe_data["sh"] = Vector<Color>(probe_sh);
+		probe_data["bounds"] = bounds;
+		probe_data["interior"] = interior;
+		probe_data["baked_exposure"] = exposure_normalization;
 		Ref<Resource> field;
 		field.instantiate();
 		field->set_meta("schema", "sh_probe_field_v1");
-		field->set_meta("probe_data", data);
+		field->set_meta("probe_data", probe_data);
 		if (ResourceSaver::save(field, p_image_data_path) != OK) {
 			return BAKE_ERROR_CANT_CREATE_IMAGE;
 		}
