@@ -36,7 +36,7 @@ private:
 
 public:
 	bool prepare(const RenderDataRD *p_data, bool p_requested, RID p_radiance, RID p_next, RID p_ap0, RID p_ap1, bool p_array, int p_roughness_layers, float p_luminance);
-	RID get_framebuffer(Ref<RenderSceneBuffersRD> p_buffers, bool p_resolve_depth);
+	RID get_framebuffer(Ref<RenderSceneBuffersRD> p_buffers, bool p_resolve_depth, bool p_resolve_color);
 	void finish(Ref<RenderSceneBuffersRD> p_buffers);
 	~MobileFog();
 };

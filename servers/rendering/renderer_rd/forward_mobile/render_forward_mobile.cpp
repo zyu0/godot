@@ -31,9 +31,15 @@
 #include "render_forward_mobile.h"
 
 #include "core/config/project_settings.h"
+#include "core/io/json.h"
+#include "core/io/marshalls.h"
+#include "core/object/callable_mp.h"
+#include "core/os/os.h"
+#include "main/performance.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
+#include "servers/rendering/renderer_rd/storage_rd/shadow_hierarchical_lod.h"
 #include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
@@ -53,7 +59,185 @@
 
 #define PRELOAD_PIPELINES_ON_SURFACE_CACHE_CONSTRUCTION 1
 
+static bool shadow_instance_merge_enabled() {
+	static const bool enabled = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_MERGE") == "1";
+	return enabled;
+}
+
+static bool shadow_instance_merge_cpu_first_enabled() {
+	static const bool enabled = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_MERGE_CPU_FIRST") != "0";
+	return enabled;
+}
+
+
 using namespace RendererSceneRenderImplementation;
+
+// Opt-in counters for work actually submitted by Mobile, including GPU-compacted
+// indirect commands. Performance monitors are keyed by render-target RID (which
+// viewport_get_render_target exposes), and belong to the render buffers.
+class RenderForwardMobile::RenderStatistics : public RefCounted {
+	Mutex mutex;
+	String prefix;
+	bool requested = false;
+	bool in_flight = false;
+	bool ready = false;
+	uint64_t current_frame = 0;
+	uint64_t source_frame = 0;
+	uint64_t counts[4] = {};
+	static const char *suffix(int p_index) {
+		static const char *names[] = { "visible_primitives", "shadow_primitives", "visible_draws", "shadow_draws", "source_frame", "ready", "age", "snapshot" };
+		return names[p_index];
+	}
+
+public:
+	void initialize(RID p_render_target) {
+		prefix = "ange/render/" + itos(p_render_target.get_id()) + "/";
+		// Performance's monitor map is owned by the main thread.
+		for (int i = 0; i < 8; i++) {
+			Performance::get_singleton()->call_deferred("add_custom_monitor", prefix + suffix(i), callable_mp(this, &RenderStatistics::get_monitor).bind(i));
+		}
+	}
+
+	Variant get_monitor(int p_index) {
+		MutexLock lock(mutex);
+		requested = true;
+		if (p_index < 4) {
+			return ready ? int64_t(counts[p_index]) : int64_t(-1);
+		}
+		if (p_index == 4) {
+			return ready ? int64_t(source_frame) : int64_t(-1);
+		}
+		if (p_index == 5) {
+			return ready;
+		}
+		const int64_t age = ready ? int64_t(current_frame - source_frame) : -1;
+		if (p_index == 6) {
+			return age;
+		}
+		Dictionary snapshot;
+		for (int i = 0; i < 4; i++) {
+			snapshot[suffix(i)] = ready ? int64_t(counts[i]) : int64_t(-1);
+		}
+		snapshot["source_frame"] = ready ? int64_t(source_frame) : int64_t(-1);
+		snapshot["ready"] = ready;
+		snapshot["age"] = age;
+		return snapshot;
+	}
+
+	bool begin(uint64_t p_frame) {
+		MutexLock lock(mutex);
+		current_frame = p_frame;
+		if (!requested || in_flight) {
+			return false;
+		}
+		requested = false;
+		in_flight = true;
+		return true;
+	}
+
+	void complete(uint64_t p_frame, const uint64_t *p_counts, bool p_valid) {
+		MutexLock lock(mutex);
+		in_flight = false;
+		if (p_valid) {
+			source_frame = p_frame;
+			for (int i = 0; i < 4; i++) {
+				counts[i] = p_counts[i];
+			}
+			ready = true;
+		}
+	}
+
+	~RenderStatistics() {
+		if (Performance::get_singleton()) {
+			for (int i = 0; i < 8; i++) {
+				Performance::get_singleton()->call_deferred("remove_custom_monitor", prefix + suffix(i));
+			}
+		}
+	}
+};
+
+class RenderForwardMobile::RenderStatisticsFrame : public RefCounted {
+	struct Command {
+		RID buffer;
+		uint32_t offset;
+		RSE::PrimitiveType primitive;
+		bool shadow;
+	};
+	Vector<Command> commands;
+	uint64_t counts[4] = {};
+	uint32_t remaining = 0;
+	bool valid = true;
+
+	static uint64_t primitives(RSE::PrimitiveType p_primitive, uint32_t p_count) {
+		switch (p_primitive) {
+			case RSE::PRIMITIVE_POINTS:
+				return p_count;
+			case RSE::PRIMITIVE_LINES:
+				return p_count / 2;
+			case RSE::PRIMITIVE_LINE_STRIP:
+				return p_count > 1 ? p_count - 1 : 0;
+			case RSE::PRIMITIVE_TRIANGLES:
+				return p_count / 3;
+			case RSE::PRIMITIVE_TRIANGLE_STRIP:
+				return p_count > 2 ? p_count - 2 : 0;
+			default:
+				return 0;
+		}
+	}
+
+	static void readback(const PackedByteArray &p_data, Ref<RefCounted> p_capture, int p_index) {
+		RenderStatisticsFrame *p_frame = static_cast<RenderStatisticsFrame *>(p_capture.ptr());
+		if (p_data.size() != 20) {
+			p_frame->valid = false;
+		} else {
+			const Command &command = p_frame->commands[p_index];
+			const uint32_t geometry = decode_uint32(p_data.ptr());
+			const uint32_t instances = decode_uint32(p_data.ptr() + 4);
+			p_frame->counts[command.shadow ? 1 : 0] += primitives(command.primitive, geometry) * instances;
+		}
+		if (--p_frame->remaining == 0) {
+			p_frame->owner->complete(p_frame->source_frame, p_frame->counts, p_frame->valid);
+		}
+	}
+
+public:
+	Ref<RenderStatistics> owner;
+	uint64_t source_frame = 0;
+
+	void add_draw(bool p_shadow, RSE::PrimitiveType p_primitive, uint32_t p_geometry, uint32_t p_instances, RID p_commands = RID(), uint32_t p_offset = 0) {
+		// Count submitted calls, including zero-instance indirect commands: they
+		// still incur command encoding/dispatch cost. Primitive work uses the GPU
+		// command's actual geometry and instance count, never allocated capacity.
+		counts[p_shadow ? 3 : 2]++;
+		if (p_commands.is_valid()) {
+			commands.push_back({ p_commands, p_offset, p_primitive, p_shadow });
+		} else {
+			counts[p_shadow ? 1 : 0] += primitives(p_primitive, p_geometry) * p_instances;
+		}
+	}
+
+	void submit() {
+		remaining = commands.size();
+		if (!remaining) {
+			owner->complete(source_frame, counts, true);
+			return;
+		}
+		// Called only after all draw lists have ended. Callbacks hold this frame,
+		// never a pointer to the viewport's counters which are reset next frame.
+		for (int i = 0; i < commands.size(); i++) {
+			const Command &command = commands[i];
+			Error error = RD::get_singleton()->buffer_get_data_async_no_stall(command.buffer, callable_mp_static(readback).bind(Ref<RefCounted>(this), i), command.offset, 20);
+			if (error != OK) {
+				valid = false;
+				remaining -= commands.size() - i;
+				if (!remaining) {
+					owner->complete(source_frame, counts, false);
+				}
+				break;
+			}
+		}
+	}
+};
 
 RendererRD::ForwardID RenderForwardMobile::ForwardIDStorageMobile::allocate_forward_id(RendererRD::ForwardIDType p_type) {
 	int32_t index = -1;
@@ -808,6 +992,26 @@ void RenderForwardMobile::_pre_opaque_render(RenderDataRD *p_render_data) {
 	p_render_data->shadows.clear();
 	p_render_data->directional_shadows.clear();
 
+	// Use receiver scissoring by default; explicit overrides retain native and
+	// same-process diagnostic controls without changing supported receiver cases.
+	static const bool scissor_enabled = OS::get_singleton()->get_environment("ANGE_SHADOW_CSM_SCISSOR") != "0";
+	bool receiver_scissor = scissor_enabled && OS::get_singleton()->get_environment("ANGE_SHADOW_CSM_SCISSOR_ACTIVE") != "0" && p_render_data->scene_data->view_count == 1 && p_render_data->scene_data->taa_jitter == Vector2() && p_render_data->scene_data->cam_projection[2][0] == 0.0 && p_render_data->scene_data->cam_projection[2][1] == 0.0;
+	if (receiver_scissor) {
+		for (RenderListType list : { RENDER_LIST_OPAQUE, RENDER_LIST_ALPHA }) {
+			for (const GeometryInstanceSurfaceDataCache *surface : render_list[list].elements) {
+				const SceneShaderForwardMobile::ShaderData *shader = surface->shader;
+				if (shader->writes_light_vertex || shader->writes_position || shader->writes_modelview_or_projection || shader->uses_skip_vertex_transform || shader->uses_point_size) {
+					receiver_scissor = false;
+					break;
+				}
+			}
+			if (!receiver_scissor) { break; }
+		}
+	}
+	if (scissor_enabled && !receiver_scissor && OS::get_singleton()->get_environment("ANGE_SHADOW_CSM_SCISSOR_TRACE") == "1") {
+		print_line("SHADOW_CSM_SCISSOR_NATIVE_RECEIVER");
+	}
+
 	float lod_distance_multiplier = p_render_data->scene_data->cam_projection.get_lod_multiplier();
 	{
 		for (int i = 0; i < p_render_data->render_shadow_count; i++) {
@@ -846,7 +1050,63 @@ void RenderForwardMobile::_pre_opaque_render(RenderDataRD *p_render_data) {
 
 		//render directional shadows
 		for (uint32_t i = 0; i < p_render_data->directional_shadows.size(); i++) {
-			_render_shadow_pass(p_render_data->render_shadows[p_render_data->directional_shadows[i]].light, p_render_data->shadow_atlas, p_render_data->render_shadows[p_render_data->directional_shadows[i]].pass, p_render_data->render_shadows[p_render_data->directional_shadows[i]].instances, lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, false, i == p_render_data->directional_shadows.size() - 1, false, p_render_data->render_info, p_render_data->scene_data->cam_transform);
+			_render_shadow_pass(p_render_data->render_shadows[p_render_data->directional_shadows[i]].light, p_render_data->shadow_atlas, p_render_data->render_shadows[p_render_data->directional_shadows[i]].pass, p_render_data->render_shadows[p_render_data->directional_shadows[i]].instances, lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, false, i == p_render_data->directional_shadows.size() - 1, false, p_render_data->render_info, p_render_data->scene_data->cam_transform, &p_render_data->render_shadows[p_render_data->directional_shadows[i]].caster_cull_planes, receiver_scissor ? &p_render_data->render_shadows[p_render_data->directional_shadows[i]].directional_receiver_rect : nullptr);
+			const RenderShadowData &shadow = p_render_data->render_shadows[p_render_data->directional_shadows[i]];
+			if (!receiver_scissor || shadow.pass != 0) {
+				continue;
+			}
+			RID base = light_storage->light_instance_get_base_light(shadow.light);
+			if (light_storage->light_directional_get_shadow_mode(base) == RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_2_SPLITS && light_storage->light_directional_get_blend_splits(base)) {
+				// The native Mobile shader blends the final active cascade into
+				// slot2 over its last10%, even in2CSM. Preserve that actual sample
+				// footprint too. A new slot has an empty atlas rect (UV0); after
+				// changing4CSM to2CSM it can retain a previous projection/rect.
+				float range_end = light_storage->light_instance_get_directional_shadow_split(shadow.light, 1);
+				float range_begin = range_end - range_end * 0.1f;
+				const Projection &camera = p_render_data->scene_data->cam_projection;
+				Projection receiver;
+				if (p_render_data->scene_data->cam_orthogonal) {
+					receiver.set_orthogonal(camera.get_viewport_half_extents().y * 2.0, camera.get_aspect(), range_begin, range_end, false);
+				} else {
+					receiver.set_perspective(camera.get_fov(), camera.get_aspect(), range_begin, range_end, true);
+				}
+				Vector3 endpoints[8];
+				receiver.get_endpoints(p_render_data->scene_data->cam_transform, endpoints);
+				Projection world_to_shadow = light_storage->light_instance_get_shadow_camera(shadow.light, 2) * Projection(light_storage->light_instance_get_shadow_transform(shadow.light, 2).affine_inverse());
+				Rect2 atlas = light_storage->light_instance_get_directional_shadow_atlas_rect(shadow.light, 2);
+				Vector2 low;
+				Vector2 high;
+				for (int j = 0; j < 8; j++) {
+					Vector4 clip = world_to_shadow.xform(Vector4(endpoints[j].x, endpoints[j].y, endpoints[j].z, 1.0));
+					Vector2 uv = atlas.position + atlas.size * (Vector2(clip.x, clip.y) / clip.w * 0.5 + Vector2(0.5, 0.5));
+					low = j == 0 ? uv : low.min(uv);
+					high = j == 0 ? uv : high.max(uv);
+				}
+				float blur = Math::abs(light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_BLUR));
+				float radius = directional_shadow_quality_radius_get();
+				float bias_blur = blur * MAX(1.0f, radius);
+				float normal_bias = Math::abs(light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_NORMAL_BIAS) * light_storage->light_instance_get_directional_shadow_texel_size(shadow.light, 2));
+				float depth_bias = Math::abs(light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_BIAS) * 0.01f * light_storage->light_instance_get_shadow_bias_scale(shadow.light, 2) * bias_blur);
+				float world_guard = 16.0f * normal_bias + 2.0f * depth_bias;
+				Vector2 jacobian(Vector3(world_to_shadow[0][0], world_to_shadow[1][0], world_to_shadow[2][0]).length(), Vector3(world_to_shadow[0][1], world_to_shadow[1][1], world_to_shadow[2][1]).length());
+				float extent = light_storage->directional_shadow_get_size();
+				Vector2 guard = atlas.size * 0.5 * jacobian * world_guard * extent + Vector2(blur * MAX(1.0f, radius) + 2.0f, blur * MAX(1.0f, radius) + 2.0f);
+				low = low * extent - guard;
+				high = high * extent + guard;
+				// Sampling clamps outside UVs to the edge texel, even when the
+				// complete footprint lies beyond the atlas after a mode change.
+				Point2i begin(CLAMP(Math::floor(low.x), 0.0f, extent - 1.0f), CLAMP(Math::floor(low.y), 0.0f, extent - 1.0f));
+				Point2i end(CLAMP(Math::ceil(high.x), 1.0f, extent), CLAMP(Math::ceil(high.y), 1.0f, extent));
+				Rect2i extra(begin, end - begin);
+				SceneState::ShadowPass &pass = scene_state.shadow_passes[scene_state.shadow_passes.size() - 1];
+				pass.receiver_sample_rect = pass.receiver_sample_rect.merge(extra);
+				if (OS::get_singleton()->get_environment("ANGE_SHADOW_CSM_SCISSOR_TRACE") == "1") {
+					Dictionary row;
+					row["rect"] = extra;
+					row["slot_atlas"] = atlas;
+					print_line("SHADOW_CSM_SCISSOR_BLEND_SAMPLE " + JSON::stringify(row));
+				}
+			}
 		}
 		//render positional shadows
 		for (uint32_t i = 0; i < p_render_data->shadows.size(); i++) {
@@ -891,6 +1151,19 @@ void RenderForwardMobile::_render_scene(RenderDataRD *p_render_data, const Color
 	bool supports_depth_resolve = RenderingDevice::get_singleton()->has_feature(RD::SUPPORTS_FRAMEBUFFER_DEPTH_RESOLVE);
 
 	RID render_target = rb->get_render_target();
+	render_statistics_frame.unref();
+	if (rb_data.is_valid() && render_target.is_valid() && Performance::get_singleton()) {
+		if (rb_data->statistics.is_null()) {
+			rb_data->statistics.instantiate();
+			rb_data->statistics->initialize(render_target);
+		}
+		const uint64_t statistics_frame = RD::get_singleton()->get_frames_drawn();
+		if (rb_data->statistics->begin(statistics_frame)) {
+			render_statistics_frame.instantiate();
+			render_statistics_frame->owner = rb_data->statistics;
+			render_statistics_frame->source_frame = statistics_frame;
+		}
+	}
 	if (render_target.is_valid()) {
 		p_render_data->scene_data->calculate_motion_vectors = texture_storage->render_target_get_override_velocity(render_target).is_valid();
 		has_depth_texture_override = texture_storage->render_target_get_override_depth(render_target).is_valid();
@@ -1271,7 +1544,33 @@ void RenderForwardMobile::_render_scene(RenderDataRD *p_render_data, const Color
 		bool fog_requested = rb_data.is_valid() && (!copy_canvas || !is_multiview) && ce_has_pre_transparent && _compositor_effects_has_flag(p_render_data, RSE::COMPOSITOR_EFFECT_FLAG_NEEDS_POST_OPAQUE_FOG, RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT);
 		RID next_radiance = p_render_data->environment.is_valid() ? sky.sky_get_next_radiance_texture_rd(environment_get_sky(p_render_data->environment), false) : RID();
 		bool defer_fog = rb_data.is_valid() && mobile_fog.prepare(p_render_data, fog_requested, radiance_texture, next_radiance, aerial_perspective.get_texture(0), aerial_perspective.get_texture(1), is_using_radiance_octmap_array(), get_roughness_layers(), 1.0f / inverse_luminance_multiplier);
-		RID opaque_framebuffer = defer_fog ? mobile_fog.get_framebuffer(rb, resolve_depth_buffer) : framebuffer;
+		// AO reads MSAA depth directly. Resolve opaque color only when a
+		// pre-transparent effect needs it; fog composition resolves the final
+		// color before transparent screen-texture copies and post-processing.
+		bool resolve_opaque_color = use_msaa && _compositor_effects_has_flag(p_render_data, RSE::COMPOSITOR_EFFECT_FLAG_ACCESS_RESOLVED_COLOR, RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT);
+		RID opaque_framebuffer = defer_fog ? mobile_fog.get_framebuffer(rb, resolve_depth_buffer, resolve_opaque_color) : framebuffer;
+		if (defer_fog) {
+			const RD::FramebufferFormatID fog_format = RD::get_singleton()->framebuffer_get_format(opaque_framebuffer);
+			bool added_format = false;
+			{
+				MutexLock lock(fog_pipeline_formats_mutex);
+				bool found_format = false;
+				for (const Pair<RD::FramebufferFormatID, uint32_t> &format : fog_pipeline_framebuffer_formats) {
+					if (format.first == fog_format) {
+						found_format = true;
+						break;
+					}
+				}
+				if (!found_format) {
+					fog_pipeline_framebuffer_formats.push_back({ fog_format, p_render_data->scene_data->view_count });
+					added_format = true;
+				}
+			}
+			if (added_format) {
+				fog_pipeline_formats_dirty = true;
+				_update_dirty_geometry_pipelines();
+			}
+		}
 
 		// Set clear colors.
 		Vector<Color> c;
@@ -1459,11 +1758,15 @@ void RenderForwardMobile::_render_scene(RenderDataRD *p_render_data, const Color
 	}
 
 	_render_buffers_debug_draw(p_render_data);
+	if (render_statistics_frame.is_valid()) {
+		render_statistics_frame->submit();
+		render_statistics_frame.unref();
+	}
 }
 
 /* these are being called from RendererSceneRenderRD::_pre_opaque_render */
 
-void RenderForwardMobile::_render_shadow_pass(RID p_light, RID p_shadow_atlas, int p_pass, const PagedArray<RenderGeometryInstance *> &p_instances, float p_lod_distance_multiplier, float p_screen_mesh_lod_threshold, bool p_open_pass, bool p_close_pass, bool p_clear_region, RenderingServerTypes::RenderInfo *p_render_info, const Transform3D &p_main_cam_transform) {
+void RenderForwardMobile::_render_shadow_pass(RID p_light, RID p_shadow_atlas, int p_pass, const PagedArray<RenderGeometryInstance *> &p_instances, float p_lod_distance_multiplier, float p_screen_mesh_lod_threshold, bool p_open_pass, bool p_close_pass, bool p_clear_region, RenderingServerTypes::RenderInfo *p_render_info, const Transform3D &p_main_cam_transform, const Vector<Plane> *p_caster_planes, const Rect2 *p_receiver_rect) {
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 
 	ERR_FAIL_COND(!light_storage->owns_light_instance(p_light));
@@ -1627,7 +1930,7 @@ void RenderForwardMobile::_render_shadow_pass(RID p_light, RID p_shadow_atlas, i
 
 	if (render_cubemap) {
 		//rendering to cubemap
-		_render_shadow_append(render_fb, p_instances, light_projection, light_transform, zfar, 0, 0, false, false, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, Rect2(), false, true, true, true, p_render_info, p_main_cam_transform);
+		_render_shadow_append(render_fb, p_instances, light_projection, light_transform, zfar, 0, 0, false, false, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, Rect2(), false, true, true, true, p_render_info, p_main_cam_transform, p_caster_planes);
 		if (finalize_cubemap) {
 			_render_shadow_process();
 			_render_shadow_end();
@@ -1646,19 +1949,39 @@ void RenderForwardMobile::_render_shadow_pass(RID p_light, RID p_shadow_atlas, i
 
 	} else {
 		//render shadow
-		_render_shadow_append(render_fb, p_instances, light_projection, light_transform, zfar, 0, 0, using_dual_paraboloid, using_dual_paraboloid_flip, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, atlas_rect, flip_y, p_clear_region, p_open_pass, p_close_pass, p_render_info, p_main_cam_transform);
+		_render_shadow_append(render_fb, p_instances, light_projection, light_transform, zfar, 0, 0, using_dual_paraboloid, using_dual_paraboloid_flip, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, atlas_rect, flip_y, p_clear_region, p_open_pass, p_close_pass, p_render_info, p_main_cam_transform, p_caster_planes);
+	if (p_receiver_rect) {
+		// The shader's rotated unit-disk PCF uses atlas pixels. Keep the hardware
+		// bilinear footprint and round outwards; never alter viewport/projection.
+		float blur = Math::abs(light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_BLUR));
+		float kernel_guard = blur * MAX(1.0f, directional_shadow_quality_radius_get()) + 2.0f;
+		float normal_bias = Math::abs(light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_NORMAL_BIAS) * light_storage->light_instance_get_directional_shadow_texel_size(p_light, p_pass));
+		float depth_bias = Math::abs(light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_BIAS) * .01f * light_storage->light_instance_get_shadow_bias_scale(p_light, p_pass) * blur * MAX(1.0f, directional_shadow_quality_radius_get()));
+		// Conservative component bound for the shader's half-precision BIAS_FUNC:
+		// |n - l dot(l,n)| <= 8*N per component, and a unit basis row has L1 <=sqrt3.
+		// 16*N +2*B also contains rounding and the nominal depth-only displacement.
+		float world_guard = 16.0f * normal_bias + 2.0f * depth_bias;
+		Vector2 guard = light_storage->light_instance_get_shadow_uv_scale(p_light, p_pass) * world_guard * Vector2(atlas_rect.size) + Vector2(kernel_guard, kernel_guard);
+		Vector2 low = Vector2(atlas_rect.position) + p_receiver_rect->position * Vector2(atlas_rect.size) - guard;
+		Vector2 high = Vector2(atlas_rect.position) + p_receiver_rect->get_end() * Vector2(atlas_rect.size) + guard;
+		int extent = light_storage->directional_shadow_get_size();
+		Point2i begin(CLAMP(Math::floor(low.x), 0.0f, float(extent)), CLAMP(Math::floor(low.y), 0.0f, float(extent)));
+		Point2i end(CLAMP(Math::ceil(high.x), 0.0f, float(extent)), CLAMP(Math::ceil(high.y), 0.0f, float(extent)));
+		scene_state.shadow_passes[scene_state.shadow_passes.size() - 1].receiver_sample_rect = Rect2i(begin, end - begin);
+	}
 	}
 }
 
 void RenderForwardMobile::_render_shadow_begin() {
 	scene_state.shadow_passes.clear();
+	scene_state.shadow_instance_keys.clear();
 	RD::get_singleton()->draw_command_begin_label("Shadow Setup");
 	_update_render_base_uniform_set();
 
 	render_list[RENDER_LIST_SECONDARY].clear();
 }
 
-void RenderForwardMobile::_render_shadow_append(RID p_framebuffer, const PagedArray<RenderGeometryInstance *> &p_instances, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, float p_bias, float p_normal_bias, bool p_use_dp, bool p_use_dp_flip, bool p_use_pancake, float p_lod_distance_multiplier, float p_screen_mesh_lod_threshold, const Rect2i &p_rect, bool p_flip_y, bool p_clear_region, bool p_begin, bool p_end, RenderingServerTypes::RenderInfo *p_render_info, const Transform3D &p_main_cam_transform) {
+void RenderForwardMobile::_render_shadow_append(RID p_framebuffer, const PagedArray<RenderGeometryInstance *> &p_instances, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, float p_bias, float p_normal_bias, bool p_use_dp, bool p_use_dp_flip, bool p_use_pancake, float p_lod_distance_multiplier, float p_screen_mesh_lod_threshold, const Rect2i &p_rect, bool p_flip_y, bool p_clear_region, bool p_begin, bool p_end, RenderingServerTypes::RenderInfo *p_render_info, const Transform3D &p_main_cam_transform, const Vector<Plane> *p_caster_planes) {
 	SceneState::ShadowPass shadow_pass;
 
 	if (p_render_info) {
@@ -1704,7 +2027,281 @@ void RenderForwardMobile::_render_shadow_append(RID p_framebuffer, const PagedAr
 	_fill_render_list(RENDER_LIST_SECONDARY, &render_data, pass_mode, true);
 	uint32_t render_list_size = render_list[RENDER_LIST_SECONDARY].elements.size() - render_list_from;
 	render_list[RENDER_LIST_SECONDARY].sort_by_key_range(render_list_from, render_list_size);
+	if (!p_use_dp && p_projection.is_orthogonal() && OS::get_singleton()->get_environment("ANGE_SHADOW_LIGHT_ORDER_ACTIVE") == "1") {
+		struct SortByLightDepth {
+			Vector3 direction;
+			bool operator()(const GeometryInstanceSurfaceDataCache *a, const GeometryInstanceSurfaceDataCache *b) const {
+				const AABB &aa = a->owner->transformed_aabb;
+				const AABB &bb = b->owner->transformed_aabb;
+				real_t da = direction.dot(aa.get_center());
+				real_t db = direction.dot(bb.get_center());
+				return da == db ? RenderList::SortByKey()(a, b) : da < db;
+			}
+		};
+		SortArray<GeometryInstanceSurfaceDataCache *, SortByLightDepth> sorter;
+		sorter.compare.direction = -p_transform.basis.get_column(Vector3::AXIS_Z);
+		auto *elements = render_list[RENDER_LIST_SECONDARY].elements.ptr() + render_list_from;
+		sorter.sort(elements, render_list_size);
+		if (OS::get_singleton()->get_environment("ANGE_SHADOW_CSM_SCISSOR_TRACE") == "1") {
+			uint32_t inversions = 0;
+			for (uint32_t i = 1; i < render_list_size; i++) {
+				inversions += sorter.compare(elements[i], elements[i - 1]);
+			}
+			print_line(vformat("SHADOW_LIGHT_ORDER surfaces=%d inversions=%d", render_list_size, inversions));
+		}
+	}
 	_fill_instance_data(RENDER_LIST_SECONDARY, render_list_from, render_list_size, false);
+
+	// Each native CSM pass owns its compact instance list. All surfaces of one
+	// geometry share one dispatch; source transforms and main-view draws stay intact.
+	shadow_pass.cull_draws.resize(render_list_size);
+	if (ShadowInstanceTree::lod_enabled()) { shadow_pass.lod_draws.resize(render_list_size); }
+	if (!p_use_dp && p_projection.is_orthogonal() && p_transform.is_finite() && !Math::is_zero_approx(p_transform.basis.determinant())) {
+		RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
+		HashMap<GeometryInstanceForwardMobile *, Vector<uint32_t>> groups;
+		for (uint32_t i = 0; i < render_list_size; i++) {
+			GeometryInstanceSurfaceDataCache *surface = render_list[RENDER_LIST_SECONDARY].elements[render_list_from + i];
+			GeometryInstanceForwardMobile *owner = surface->owner;
+			if (!(owner->base_flags & INSTANCE_DATA_FLAG_MULTIMESH) || (owner->base_flags & (INSTANCE_DATA_FLAG_MULTIMESH_INDIRECT | INSTANCE_DATA_FLAG_PARTICLES)) || owner->instance_count == 0) {
+				continue;
+			}
+			groups[owner].push_back(i);
+		}
+		struct Prepared {
+			GeometryInstanceForwardMobile *owner = nullptr;
+			ShadowInstanceTree *tree = nullptr;
+			Vector<uint32_t> indices;
+			Vector<uint32_t> counts;
+			Vector<Plane> planes;
+			Projection projection;
+			RendererRD::ShadowInstanceCulling::SourceSlice source;
+			uint32_t stride = 0;
+			uint32_t hash = 0;
+		};
+		Vector<Prepared> prepared;
+		HashMap<uint32_t, Vector<uint32_t>> buckets;
+		// Ordinary CPU-owned instance fields participate without a scene controller.
+		static const bool auto_bounds_enabled = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_AUTO") != "0";
+		for (const KeyValue<GeometryInstanceForwardMobile *, Vector<uint32_t>> &group : groups) {
+			GeometryInstanceForwardMobile *owner = group.key;
+			ShadowInstanceTree *tree = mesh_storage->multimesh_get_shadow_culling(owner->data->base, false);
+			const bool explicit_bounds = tree != nullptr;
+			Transform3D model = owner->get_transform();
+			if ((!tree && !auto_bounds_enabled) || !model.is_finite() || Math::is_zero_approx(model.basis.determinant()) || owner->mesh_instance.is_valid()) {
+				continue;
+			}
+			Vector<uint32_t> indices;
+			Vector<uint32_t> counts;
+			for (uint32_t index : group.value) {
+				GeometryInstanceSurfaceDataCache *surface = render_list[RENDER_LIST_SECONDARY].elements[render_list_from + index];
+				SceneShaderForwardMobile::ShaderData *shadow_shader = surface->shader_shadow;
+				if (!surface->surface_shadow || !shadow_shader || shadow_shader->writes_position || shadow_shader->writes_modelview_or_projection || shadow_shader->uses_skip_vertex_transform || shadow_shader->uses_point_size || shadow_shader->uses_world_coordinates || (!explicit_bounds && shadow_shader->uses_vertex)) {
+					continue;
+				}
+				if (!tree) {
+					tree = mesh_storage->multimesh_get_shadow_culling(owner->data->base, auto_bounds_enabled);
+				}
+				if (!tree || !tree->get_local_bounds().encloses(mesh_storage->mesh_surface_get_aabb(surface->surface_shadow))) {
+					continue;
+				}
+				uint32_t lod = render_list[RENDER_LIST_SECONDARY].element_info[render_list_from + index].lod_index;
+				indices.push_back(index);
+				counts.push_back(mesh_storage->mesh_surface_get_shadow_draw_count(surface->surface_shadow, lod));
+			}
+			if (indices.is_empty()) {
+				continue;
+			}
+			Vector<Plane> local_caster_planes;
+			if (p_caster_planes) {
+				Transform3D world_to_model = model.affine_inverse();
+				for (const Plane &plane : *p_caster_planes) {
+					local_caster_planes.push_back(world_to_model.xform(plane));
+				}
+			}
+			Projection model_to_clip = p_projection * Projection(p_transform.affine_inverse() * model);
+			uint32_t current_offset = 0;
+			uint32_t previous_offset = 0;
+			mesh_storage->_multimesh_get_motion_vectors_offsets(owner->data->base, current_offset, previous_offset);
+			uint32_t stride = 3 + uint32_t(mesh_storage->multimesh_uses_colors(owner->data->base)) + uint32_t(mesh_storage->multimesh_uses_custom_data(owner->data->base));
+			Prepared item;
+			item.owner = owner; item.tree = tree; item.indices = indices; item.counts = counts;
+			item.planes = local_caster_planes; item.projection = model_to_clip; item.stride = stride;
+			item.source = { mesh_storage->_multimesh_get_buffer_rd_rid(owner->data->base), tree, owner->instance_count, current_offset };
+			if (ShadowInstanceTree::lod_enabled() && scene_data.screen_mesh_lod_threshold > 0 && tree->active()) {
+				bool has_lods = false;
+				for (uint32_t index : item.indices) {
+					has_lods |= mesh_storage->mesh_surface_has_lod(render_list[RENDER_LIST_SECONDARY].elements[render_list_from + index]->surface);
+				}
+				if (has_lods) {
+					using Selector = ShadowHierarchicalLOD;
+					Selector::Parameters parameters;
+					for (int axis = 0; axis < 3; axis++) {
+						parameters.origins[0][axis] = p_main_cam_transform.origin[axis];
+						parameters.origins[1][axis] = p_main_cam_transform.origin[axis];
+					}
+					parameters.min_instances_to_split.fill(0);
+					parameters.max_distance.fill(INFINITY);
+					float parent_scale = ShadowInstanceTree::lod_basis_scale(model.basis) * owner->lod_bias;
+					auto node_at = [&](int node_index) {
+						AABB bounds = model.xform(tree->lod_node_bounds(node_index));
+						Selector::Node node;
+						for (int axis = 0; axis < 3; axis++) {
+							node.min[axis] = bounds.position[axis];
+							node.max[axis] = bounds.position[axis] + bounds.size[axis];
+						}
+						node.first = tree->lod_node_first(node_index);
+						node.count = tree->lod_node_count(node_index);
+						node.child_count = tree->lod_node_left(node_index) < 0 ? 0 : 2;
+						return node;
+					};
+					auto child_at = [&](int node, uint32_t child) { return child == 0 ? tree->lod_node_left(node) : tree->lod_node_right(node); };
+					auto classify = [](const Selector::Node &) { return 1; };
+					auto occluded = [](int) { return false; };
+					std::vector<Selector::Runs> surface_runs(item.indices.size());
+					bool native_lods_match = true;
+					for (int surface_index = 0; surface_index < item.indices.size(); surface_index++) {
+						auto *surface = render_list[RENDER_LIST_SECONDARY].elements[render_list_from + item.indices[surface_index]];
+						// The source HISM selector exposes at most eight levels. Additional
+						// Godot levels retain level seven's finer geometry in this experiment.
+						parameters.lod_count = MIN(8u, mesh_storage->mesh_surface_get_lod_count(surface->surface) + 1);
+						auto policy = [&](const Selector::Node &node, int index, int &min_lod, int &max_lod) {
+							auto distances = Selector::distance_range(node, parameters);
+							uint32_t ignored = 0;
+							uint32_t near_lod = mesh_storage->mesh_surface_get_lod(surface->surface, parent_scale * tree->lod_node_max_scale(index), MAX(0.0f, distances[0]) * p_lod_distance_multiplier, scene_data.screen_mesh_lod_threshold, ignored);
+							uint32_t far_lod = mesh_storage->mesh_surface_get_lod(surface->surface, parent_scale * tree->lod_node_min_scale(index), MAX(0.0f, distances[1]) * p_lod_distance_multiplier, scene_data.screen_mesh_lod_threshold, ignored);
+							min_lod = MAX(min_lod, int(MIN(near_lod, uint32_t(parameters.lod_count - 1))));
+							max_lod = MIN(max_lod, int(far_lod));
+						};
+						Selector::Runs &runs = surface_runs[surface_index];
+						Selector::select_with_policy(parameters, 0, 0, parameters.lod_count - 1, true, node_at, child_at, classify, occluded, policy, runs);
+						uint32_t native_lod = render_list[RENDER_LIST_SECONDARY].element_info[render_list_from + item.indices[surface_index]].lod_index;
+						// A single native draw is equivalent only when the selector retains
+						// the complete tree at that draw's LOD, including hidden tail IDs.
+						native_lods_match &= native_lod < uint32_t(parameters.lod_count) && runs.single_count[native_lod] == tree->lod_node_count(0);
+						for (int lod = 0; lod < parameters.lod_count; lod++) {
+							if (uint32_t(lod) != native_lod && runs.single_count[lod] != 0) {
+								native_lods_match = false;
+							}
+						}
+					}
+					if (!native_lods_match) {
+						RendererRD::ShadowInstanceCulling::LODPartition partition;
+						partition.surfaces = item.indices.size();
+						Vector<uint32_t> lod_counts;
+						for (int surface_index = 0; surface_index < item.indices.size(); surface_index++) {
+							auto *surface = render_list[RENDER_LIST_SECONDARY].elements[render_list_from + item.indices[surface_index]];
+							const auto &runs = surface_runs[surface_index];
+							for (int lod = 0; lod < int(runs.single.size()); lod++) {
+								RendererRD::ShadowInstanceCulling::LODBucket bucket;
+								bucket.surface = surface_index;
+								bucket.lod = lod;
+								const auto &ranges = runs.single[lod];
+								for (size_t range = 0; range < ranges.size(); range += 2) {
+									for (uint32_t sorted = ranges[range]; sorted <= ranges[range + 1]; sorted++) {
+										uint32_t id = tree->lod_original_id(sorted);
+										if (id < item.source.count) { bucket.instances.push_back(id); }
+									}
+								}
+								if (!bucket.instances.is_empty()) {
+									lod_counts.push_back(mesh_storage->mesh_surface_get_shadow_draw_count(surface->surface_shadow, lod));
+									partition.buckets.push_back(bucket);
+								}
+							}
+						}
+						auto draws = shadow_instance_culling.prepare(item.source.buffer, scene_shader.default_shader_rd, item.projection, *tree, item.source.count, item.source.offset, stride, lod_counts, p_use_pancake, item.planes, nullptr, nullptr, false, nullptr, &partition);
+						if (draws.size() == partition.buckets.size()) {
+							for (int bucket = 0; bucket < draws.size(); bucket++) {
+								RendererRD::ShadowInstanceCulling::LODDraw lod_draw;
+								lod_draw.lod = partition.buckets[bucket].lod;
+								lod_draw.draw = draws[bucket];
+								shadow_pass.lod_draws.write[item.indices[partition.buckets[bucket].surface]].push_back(lod_draw);
+							}
+							continue;
+						}
+						ERR_PRINT("Hierarchical shadow LOD preparation failed.");
+					} else {
+						static const bool trace_native_match = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_TRACE") == "1";
+						if (trace_native_match && OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_TRACE_HOLD") != "1") {
+							print_line(vformat("SHADOW_LOD_NATIVE_MATCH frame=%d instances=%d surfaces=%d", RD::get_singleton()->get_frames_drawn(), item.source.count, item.indices.size()));
+						}
+					}
+				}
+			}
+			if (shadow_instance_merge_enabled() && shadow_instance_merge_cpu_first_enabled()) {
+				bool needs_gpu = false;
+				auto cpu_draws = shadow_instance_culling.prepare(item.source.buffer, scene_shader.default_shader_rd, item.projection, *tree, item.source.count, item.source.offset, stride, counts, p_use_pancake, item.planes, nullptr, nullptr, false, &needs_gpu);
+				if (!needs_gpu) {
+					// Keep native direct draws and exact per-surface CPU skips out
+					// of gather/indirect work. Only unresolved GPU work is merged.
+					if (cpu_draws.size() == item.indices.size()) {
+						for (int i = 0; i < cpu_draws.size(); i++) { shadow_pass.cull_draws.write[item.indices[i]] = cpu_draws[i]; }
+					}
+					continue;
+				}
+			}
+			if (shadow_instance_merge_enabled()) {
+				uint32_t hash = hash_murmur3_one_32(stride);
+				for (uint32_t index : item.indices) {
+					GeometryInstanceSurfaceDataCache *surface = render_list[RENDER_LIST_SECONDARY].elements[render_list_from + index];
+					const SceneState::InstanceData &key = scene_state.shadow_instance_keys[render_list_from + index];
+					hash = hash_murmur3_one_64(uint64_t(surface->surface_shadow), hash);
+					hash = hash_murmur3_buffer(&key, sizeof(key), hash);
+				}
+				item.hash = hash;
+				buckets[hash].push_back(prepared.size());
+			}
+			prepared.push_back(item);
+		}
+		Vector<uint8_t> handled;
+		handled.resize_initialized(prepared.size());
+		auto compatible = [&](const Prepared &a, const Prepared &b) {
+			if (a.indices.size() != b.indices.size() || a.stride != b.stride || a.owner->mirror != b.owner->mirror || a.owner->get_transform() != b.owner->get_transform() || a.tree->get_local_bounds() != b.tree->get_local_bounds()) { return false; }
+			for (int n = 0; n < a.indices.size(); n++) {
+				uint32_t ai = render_list_from + a.indices[n], bi = render_list_from + b.indices[n];
+				GeometryInstanceSurfaceDataCache *sa = render_list[RENDER_LIST_SECONDARY].elements[ai], *sb = render_list[RENDER_LIST_SECONDARY].elements[bi];
+				if (sa->surface_shadow != sb->surface_shadow || sa->shader_shadow != sb->shader_shadow || sa->material_uniform_set_shadow != sb->material_uniform_set_shadow || sa->flags != sb->flags || sa->primitive != sb->primitive || render_list[RENDER_LIST_SECONDARY].element_info[ai].lod_index != render_list[RENDER_LIST_SECONDARY].element_info[bi].lod_index || memcmp(&scene_state.shadow_instance_keys[ai], &scene_state.shadow_instance_keys[bi], sizeof(SceneState::InstanceData)) != 0) { return false; }
+			}
+			return true;
+		};
+		for (int a = 0; a < prepared.size(); a++) {
+			if (handled[a]) { continue; }
+			const Prepared &item = prepared[a];
+			Vector<uint32_t> members;
+			Vector<RendererRD::ShadowInstanceCulling::SourceSlice> sources;
+			uint64_t total = item.source.count;
+			members.push_back(a); sources.push_back(item.source);
+			if (shadow_instance_merge_enabled()) {
+				for (uint32_t b : buckets[item.hash]) {
+					if (b <= uint32_t(a) || handled[b] || total + prepared[b].source.count > 65536 || !compatible(item, prepared[b])) { continue; }
+					members.push_back(b); sources.push_back(prepared[b].source); total += prepared[b].source.count;
+				}
+			}
+			if (members.size() > 1) {
+				auto merged = shadow_instance_culling.prepare_merged(sources, scene_shader.default_shader_rd, item.projection, item.stride, item.counts, p_use_pancake, item.planes);
+				if (merged.status != RendererRD::ShadowInstanceCulling::KEEP_ORIGINAL) {
+					for (int surface = 0; surface < item.indices.size(); surface++) {
+						shadow_pass.cull_draws.write[item.indices[surface]] = merged.draws[surface];
+					}
+					for (int m = 1; m < members.size(); m++) {
+						const Prepared &follower = prepared[members[m]];
+						handled.write[members[m]] = 1;
+						for (int surface = 0; surface < follower.indices.size(); surface++) {
+							RendererRD::ShadowInstanceCulling::Draw skip;
+							skip.cpu_decision = merged.status == RendererRD::ShadowInstanceCulling::READY ? 5 : 2;
+							skip.geometry_count = follower.counts[surface];
+							shadow_pass.cull_draws.write[follower.indices[surface]] = skip;
+						}
+					}
+					continue;
+				}
+			}
+			Vector<RendererRD::ShadowInstanceCulling::Draw> draws = shadow_instance_culling.prepare(item.source.buffer, scene_shader.default_shader_rd, item.projection, *item.tree, item.source.count, item.source.offset, item.stride, item.counts, p_use_pancake, item.planes);
+			if (draws.size() == item.indices.size()) {
+				for (int i = 0; i < draws.size(); i++) { shadow_pass.cull_draws.write[item.indices[i]] = draws[i]; }
+			}
+		}
+	}
+
 
 	{
 		//regular forward for now
@@ -1752,6 +2349,31 @@ void RenderForwardMobile::_render_shadow_end() {
 
 	for (SceneState::ShadowPass &shadow_pass : scene_state.shadow_passes) {
 		RenderListParameters render_list_parameters(render_list[RENDER_LIST_SECONDARY].elements.ptr() + shadow_pass.element_from, render_list[RENDER_LIST_SECONDARY].element_info.ptr() + shadow_pass.element_from, shadow_pass.element_count, shadow_pass.flip_cull, shadow_pass.pass_mode, shadow_pass.rp_uniform_set, scene_shader.default_specialization, false, Vector2(), shadow_pass.lod_distance_multiplier, shadow_pass.screen_mesh_lod_threshold, 1, shadow_pass.element_from);
+		if (shadow_pass.receiver_sample_rect.has_area()) {
+			// PCF has no per-cascade clamp. Preserve samples reaching another
+			// cascade's tile, including across a nonzero atlas viewport offset.
+			Rect2i footprint;
+			for (const SceneState::ShadowPass &receiver : scene_state.shadow_passes) {
+				if (receiver.framebuffer != shadow_pass.framebuffer || !receiver.receiver_sample_rect.has_area()) { continue; }
+				Rect2i part = receiver.receiver_sample_rect.intersection(shadow_pass.rect);
+				if (part.has_area()) { footprint = footprint.has_area() ? footprint.merge(part) : part; }
+			}
+			if (footprint.has_area()) {
+				render_list_parameters.shadow_scissor = Rect2i(footprint.position - shadow_pass.rect.position, footprint.size);
+				if (OS::get_singleton()->get_environment("ANGE_SHADOW_CSM_SCISSOR_TRACE") == "1") {
+					Dictionary row;
+					row["frame"] = RD::get_singleton()->get_frames_drawn();
+					row["tile"] = shadow_pass.rect;
+					row["samples"] = shadow_pass.receiver_sample_rect;
+					row["scissor_local"] = render_list_parameters.shadow_scissor;
+					row["tile_pixels"] = int64_t(shadow_pass.rect.get_area());
+					row["draw_pixels"] = int64_t(footprint.get_area());
+					print_line("SHADOW_CSM_SCISSOR " + JSON::stringify(row));
+				}
+			}
+		}
+		render_list_parameters.shadow_cull_draws = shadow_pass.cull_draws.ptr();
+		render_list_parameters.shadow_lod_draws = shadow_pass.lod_draws.ptr();
 		_render_list_with_draw_list(&render_list_parameters, shadow_pass.framebuffer, shadow_pass.clear_depth ? RD::DRAW_CLEAR_DEPTH : RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0, shadow_pass.rect);
 	}
 
@@ -1951,15 +2573,44 @@ void RenderForwardMobile::base_uniforms_changed() {
 void RenderForwardMobile::_update_render_base_uniform_set() {
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 
-	if (render_base_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(render_base_uniform_set) || (lightmap_texture_array_version != light_storage->lightmap_array_get_version())) {
+	if (render_base_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(render_base_uniform_set) || (lightmap_texture_array_version != light_storage->lightmap_array_get_version()) || baked_texture_version != light_storage->get_baked_texture_version()) {
 		if (render_base_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(render_base_uniform_set)) {
 			RD::get_singleton()->free_rid(render_base_uniform_set);
 		}
 
 		lightmap_texture_array_version = light_storage->lightmap_array_get_version();
+		baked_texture_version = light_storage->get_baked_texture_version();
 
 		thread_local LocalVector<RD::Uniform> uniforms;
 		uniforms.clear();
+
+		{
+			RD::Uniform u;
+			u.binding = 18;
+			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+			for (RID texture : light_storage->get_baked_depth_textures()) {
+					// Forward+ depth/shadow setup can precede this view's light update.
+					if (!RD::get_singleton()->texture_is_valid(texture)) {
+						texture = RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_DEPTH);
+					}
+					u.append_id(texture);
+				}
+			uniforms.push_back(u);
+		}
+
+		{
+			RD::Uniform u;
+			u.binding = 19;
+			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+			for (RID texture : light_storage->get_baked_visibility_textures()) {
+					// Forward+ depth/shadow setup can precede this view's light update.
+					if (!RD::get_singleton()->texture_is_valid(texture)) {
+						texture = RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_WHITE);
+					}
+					u.append_id(texture);
+				}
+			uniforms.push_back(u);
+		}
 
 		{
 			RD::Uniform u;
@@ -2220,6 +2871,19 @@ void RenderForwardMobile::_fill_instance_data(RenderListType p_render_list, uint
 		instance_data.set_uv_scale(uv_scale);
 
 		scene_state.curr_gpu_ptr[p_render_list][i + p_offset] = instance_data;
+		if (p_render_list == RENDER_LIST_SECONDARY && shadow_instance_merge_enabled()) {
+			if (scene_state.shadow_instance_keys.size() < int(p_offset + element_total)) {
+				scene_state.shadow_instance_keys.resize(p_offset + element_total);
+			}
+			SceneState::InstanceData key = instance_data;
+			key.compressed_aabb_position[3] = 0;
+			key.padding[0] = key.padding[1] = 0;
+#ifdef REAL_T_IS_DOUBLE
+			key.model_precision[3] = key.prev_model_precision[3] = 0;
+#endif
+			scene_state.shadow_instance_keys.write[i + p_offset] = key;
+		}
+
 
 		RenderElementInfo &element_info = rl->element_info[p_offset + i];
 
@@ -2268,7 +2932,6 @@ void RenderForwardMobile::_fill_render_list(RenderListType p_render_list, const 
 
 	for (int i = 0; i < (int)p_render_data->instances->size(); i++) {
 		GeometryInstanceForwardMobile *inst = static_cast<GeometryInstanceForwardMobile *>((*p_render_data->instances)[i]);
-
 		Vector3 center = inst->transform.origin;
 		if (p_render_data->scene_data->cam_orthogonal) {
 			if (inst->use_aabb_center) {
@@ -2479,6 +3142,9 @@ void RenderForwardMobile::_render_list_with_draw_list(RenderListParameters *p_pa
 	p_params->framebuffer_format = fb_format;
 
 	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(p_framebuffer, p_draw_flags, p_clear_color_values, p_clear_depth_value, p_clear_stencil_value, p_region);
+	if (p_params->shadow_scissor.has_area()) {
+		RD::get_singleton()->draw_list_enable_scissor(draw_list, p_params->shadow_scissor);
+	}
 	_render_list(draw_list, fb_format, p_params, 0, p_params->element_count);
 	RD::get_singleton()->draw_list_end();
 }
@@ -2515,11 +3181,34 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 
 	for (uint32_t i = p_from_element; i < p_to_element; i++) {
 		const GeometryInstanceSurfaceDataCache *surf = p_params->elements[i];
-		const RenderElementInfo &element_info = p_params->element_info[i];
 		const GeometryInstanceForwardMobile *inst = surf->owner;
 
 		if (inst->instance_count == 0) {
 			continue;
+		}
+
+		const Vector<RendererRD::ShadowInstanceCulling::LODDraw> *lod_draws = nullptr;
+		if constexpr (p_pass_mode == PASS_MODE_SHADOW) {
+			if (p_params->shadow_lod_draws && !p_params->shadow_lod_draws[i].is_empty()) {
+				lod_draws = &p_params->shadow_lod_draws[i];
+			}
+		}
+		for (int lod_draw_index = 0; lod_draw_index < (lod_draws ? lod_draws->size() : 1); lod_draw_index++) {
+		RenderElementInfo element_info = p_params->element_info[i];
+		const RendererRD::ShadowInstanceCulling::Draw *selected_lod_draw = nullptr;
+		if (lod_draws) {
+			element_info.lod_index = (*lod_draws)[lod_draw_index].lod;
+			selected_lod_draw = &(*lod_draws)[lod_draw_index].draw;
+		}
+
+		if constexpr (p_pass_mode == PASS_MODE_SHADOW) {
+			if (selected_lod_draw || p_params->shadow_cull_draws) {
+				const RendererRD::ShadowInstanceCulling::Draw &draw = selected_lod_draw ? *selected_lod_draw : p_params->shadow_cull_draws[i];
+				RendererRD::ShadowInstanceCulling::trace_cpu_draw(draw, inst->instance_count);
+				if (draw.skip()) {
+					continue;
+				}
+			}
 		}
 
 		SceneShaderForwardMobile::ShaderSpecialization pipeline_specialization = p_params->base_specialization;
@@ -2597,6 +3286,18 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 
 		pipeline_key.primitive_type = surf->primitive;
 		RID xforms_uniform_set = surf->owner->transforms_uniform_set;
+		push_constant.shadow_instance_remap_base = 0;
+		push_constant.shadow_instance_original_id_base = 0;
+		const RendererRD::ShadowInstanceCulling::Draw *culled_draw = selected_lod_draw;
+		if (!culled_draw && p_pass_mode == PASS_MODE_SHADOW && p_params->shadow_cull_draws && p_params->shadow_cull_draws[i].commands.is_valid()) {
+			culled_draw = &p_params->shadow_cull_draws[i];
+		}
+		if (culled_draw) {
+			xforms_uniform_set = culled_draw->transforms;
+			push_constant.shadow_instance_remap_base = culled_draw->remap_base;
+			push_constant.shadow_instance_original_id_base = culled_draw->original_id_base;
+		}
+
 
 		switch (p_pass_mode) {
 			case PASS_MODE_COLOR:
@@ -2689,6 +3390,7 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 		}
 
 		if (pipeline_valid) {
+			RendererRD::ShadowInstanceCulling::trace_pipeline(shadow_pass, pipeline_key.ubershader != 0);
 			if (!emulate_point_size) {
 				index_array_rd = mesh_storage->mesh_surface_get_index_array(mesh_surface, element_info.lod_index);
 			} else {
@@ -2734,6 +3436,11 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 				push_constant.multimesh_motion_vectors_previous_offset = 0;
 			}
 
+			if (culled_draw) {
+				push_constant.multimesh_motion_vectors_current_offset = 0;
+				push_constant.multimesh_motion_vectors_previous_offset = 0;
+			}
+
 			size_t push_constant_size = 0;
 			if (pipeline_key.ubershader) {
 				push_constant_size = sizeof(SceneState::PushConstant);
@@ -2746,7 +3453,8 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 
 			RD::get_singleton()->draw_list_set_push_constant(draw_list, &push_constant, push_constant_size);
 
-			uint32_t instance_count = surf->owner->instance_count > 1 ? surf->owner->instance_count : 1;
+			uint32_t instance_count = surf->owner->instance_count;
+			instance_count = MAX(instance_count, 1u);
 			if (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_PARTICLE_TRAILS) {
 				instance_count /= surf->owner->trail_steps;
 			}
@@ -2758,12 +3466,52 @@ void RenderForwardMobile::_render_list_template(RenderingDevice::DrawListID p_dr
 					WARN_PRINT("Indirect draws are not supported when emulating point size.");
 				}
 				RD::get_singleton()->draw_list_draw(draw_list, false, mesh_storage->mesh_surface_get_vertex_count(mesh_surface), instance_count * 6);
+				if (render_statistics_frame.is_valid()) {
+					render_statistics_frame->add_draw(shadow_pass, RSE::PRIMITIVE_TRIANGLES, instance_count * 6, mesh_storage->mesh_surface_get_vertex_count(mesh_surface));
+				}
+			} else if (culled_draw) {
+				RD::get_singleton()->draw_list_draw_indirect(draw_list, index_array_rd.is_valid(), culled_draw->commands, culled_draw->command_offset, 1, 0);
+				if (render_statistics_frame.is_valid()) {
+					render_statistics_frame->add_draw(shadow_pass, surf->primitive, 0, 0, culled_draw->commands, culled_draw->command_offset);
+				}
+				RendererRD::ShadowInstanceCulling::trace_merged_submission(*culled_draw);
+				if (lod_draws) { RendererRD::ShadowInstanceCulling::trace_lod_submission((*lod_draws)[lod_draw_index]); }
 			} else if (indirect) {
 				RD::get_singleton()->draw_list_draw_indirect(draw_list, index_array_rd.is_valid(), mesh_storage->_multimesh_get_command_buffer_rd_rid(surf->owner->data->base), surf->surface_index * sizeof(uint32_t) * mesh_storage->INDIRECT_MULTIMESH_COMMAND_STRIDE, 1, 0);
+				if (render_statistics_frame.is_valid()) {
+					render_statistics_frame->add_draw(shadow_pass, surf->primitive, 0, 0, mesh_storage->_multimesh_get_command_buffer_rd_rid(surf->owner->data->base), surf->surface_index * sizeof(uint32_t) * mesh_storage->INDIRECT_MULTIMESH_COMMAND_STRIDE);
+				}
 			} else {
 				RD::get_singleton()->draw_list_draw(draw_list, index_array_rd.is_valid(), instance_count);
+				if (render_statistics_frame.is_valid()) {
+					render_statistics_frame->add_draw(shadow_pass, surf->primitive, mesh_storage->mesh_surface_get_shadow_draw_count(mesh_surface, element_info.lod_index), instance_count);
+				}
+			}
+			if constexpr (p_pass_mode == PASS_MODE_SHADOW || p_pass_mode == PASS_MODE_SHADOW_DP) {
+				static const bool draw_census = OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_TRACE") == "1";
+				if (draw_census && OS::get_singleton()->get_environment("ANGE_SHADOW_CULL_TRACE_HOLD") != "1") {
+					Dictionary report;
+					report["frame"] = int64_t(RD::get_singleton()->get_frames_drawn());
+					report["element"] = int64_t(i + p_params->element_offset);
+					report["pass_start"] = int64_t(p_params->element_offset);
+					report["owner"] = int64_t(reinterpret_cast<uintptr_t>(surf->owner));
+					report["base"] = int64_t(surf->owner->data->base.get_id());
+					report["surface"] = int64_t(surf->surface_index);
+					report["lod"] = int64_t(element_info.lod_index);
+					report["lod_draw"] = lod_draw_index;
+					report["primitive"] = int(surf->primitive);
+					report["geometry_count"] = int64_t(mesh_storage->mesh_surface_get_shadow_draw_count(mesh_surface, element_info.lod_index));
+					report["instances"] = int64_t(instance_count);
+					report["kind"] = emulate_point_size ? "point_emulation" : (culled_draw ? "culled_indirect" : (indirect ? "native_indirect" : "direct"));
+					if (culled_draw) {
+						report["command_buffer"] = int64_t(culled_draw->commands.get_id());
+						report["command_offset"] = int64_t(culled_draw->command_offset);
+					}
+					print_line("SHADOW_DRAW_CENSUS " + JSON::stringify(report));
+				}
 			}
 		}
+		} // Per-surface LOD commands reuse the current material/pipeline state.
 	}
 
 	// Make the actual redraw request
@@ -3472,6 +4220,29 @@ void RenderForwardMobile::_mesh_compile_pipelines_for_surface(const SurfacePipel
 		}
 	}
 
+	if (p_surface.uses_opaque) {
+		// Resource loaders can compile meshes while the render thread learns a
+		// new format. Keep this COW snapshot stable without locking compilation.
+		Vector<Pair<RD::FramebufferFormatID, uint32_t>> fog_formats;
+		{
+			MutexLock lock(fog_pipeline_formats_mutex);
+			fog_formats = fog_pipeline_framebuffer_formats;
+		}
+		for (const Pair<RD::FramebufferFormatID, uint32_t> &fog_format : fog_formats) {
+			const bool multiview = fog_format.second > 1;
+			if (multiview && !multiview_enabled) {
+				continue;
+			}
+			pipeline_key.framebuffer_format_id = fog_format.first;
+			pipeline_key.version = multiview ? SceneShaderForwardMobile::SHADER_VERSION_COLOR_FOG_MASK_MULTIVIEW : SceneShaderForwardMobile::SHADER_VERSION_COLOR_FOG_MASK;
+			_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);
+			if (p_global.use_lightmaps && p_surface.can_use_lightmap) {
+				pipeline_key.version = multiview ? SceneShaderForwardMobile::SHADER_VERSION_LIGHTMAP_FOG_MASK_MULTIVIEW : SceneShaderForwardMobile::SHADER_VERSION_LIGHTMAP_FOG_MASK;
+				_mesh_compile_pipeline_for_surface(p_surface.shader, p_surface.mesh_surface, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);
+			}
+		}
+	}
+
 	if (p_global.use_reflection_probes) {
 		pipeline_key.version = SceneShaderForwardMobile::SHADER_VERSION_COLOR_PASS;
 		pipeline_key.framebuffer_format_id = _get_reflection_probe_color_framebuffer_format_for_pipeline(octmap_use_storage);
@@ -3531,7 +4302,7 @@ void RenderForwardMobile::_update_dirty_geometry_instances() {
 }
 
 void RenderForwardMobile::_update_dirty_geometry_pipelines() {
-	if (global_pipeline_data_required.key != global_pipeline_data_compiled.key) {
+	if (global_pipeline_data_required.key != global_pipeline_data_compiled.key || fog_pipeline_formats_dirty) {
 		// Go through the entire list of surfaces and compile pipelines for everything again.
 		SelfList<GeometryInstanceSurfaceDataCache> *list = geometry_surface_compilation_all_list.first();
 		while (list != nullptr) {
@@ -3547,6 +4318,7 @@ void RenderForwardMobile::_update_dirty_geometry_pipelines() {
 		}
 
 		global_pipeline_data_compiled.key = global_pipeline_data_required.key;
+		fog_pipeline_formats_dirty = false;
 	} else {
 		// Compile pipelines only for the dirty list.
 		if (!geometry_surface_compilation_dirty_list.first()) {

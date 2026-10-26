@@ -1106,11 +1106,10 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	String oidn_path;
 
 	if (!p_probes_only && p_use_denoiser && denoiser == 1) {
-		// Native batch callers do not initialize EditorSettings.
+		// OIDN (external).
 		if (EditorSettings::get_singleton()) {
 			oidn_path = EDITOR_GET("filesystem/tools/oidn/oidn_denoise_path");
 		}
-		// OIDN (external).
 		Ref<DirAccess> da = DirAccess::create(DirAccess::ACCESS_FILESYSTEM);
 
 		if (da->dir_exists(oidn_path)) {
@@ -1266,11 +1265,13 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 
 		emission_array_tex = rd->texture_create(tf, RD::TextureView(), emission_data);
 
-		// Probe integration samples the atlas inputs, not surface-lightmap scratch.
+		// Probe rays use triangle normals/positions and the UV2 albedo/emission
+		// inputs above. They never read the surface-lightmap scratch textures.
 		if (p_probes_only) {
 			tf.width = 1;
 			tf.height = 1;
 			tf.array_layers = 1;
+			print_line(vformat("SH_PROBE_ONLY_SCRATCH_MINIMAL atlas=%dx%dx%d scratch=1x1x1", atlas_size.width, atlas_size.height, atlas_slices));
 		}
 
 		//this will be rastered to
@@ -1728,6 +1729,7 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 			}
 		}
 
+
 		/* UNOCCLUDE */
 		{
 			Vector<RD::Uniform> uniforms;
@@ -1764,13 +1766,13 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 			rd->compute_list_end(); //done
 		}
 
-#ifdef DEBUG_TEXTURES
+	#ifdef DEBUG_TEXTURES
 		for (int i = 0; i < atlas_slices; i++) {
 			Vector<uint8_t> s = rd->texture_get_data(unocclude_tex, i);
 			Ref<Image> img = Image::create_from_data(atlas_size.width, atlas_size.height, false, Image::FORMAT_RGBAF, s);
 			img->save_exr("res://1_unocclude_" + itos(i) + ".exr", false);
 		}
-#endif
+	#endif
 
 		if (p_step_function) {
 			if (p_step_function(0.5, RTR("Plot direct lighting"), p_bake_userdata, true)) {
@@ -1915,7 +1917,7 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 			}
 		}
 
-#ifdef DEBUG_TEXTURES
+	#ifdef DEBUG_TEXTURES
 
 		for (int i = 0; i < atlas_slices; i++) {
 			Vector<uint8_t> s = rd->texture_get_data(light_source_tex, i);
@@ -1930,7 +1932,7 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 				img->save_exr("res://2_light_primary_accum_" + itos(i) + ".exr", false);
 			}
 		}
-#endif
+	#endif
 
 		/* SECONDARY (indirect) LIGHT PASS(ES) */
 
@@ -2181,7 +2183,6 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 		}
 	}
 
-
 	if (p_probes_only) {
 		if (probe_positions.size() > 0) {
 			probe_values.resize(probe_positions.size() * 9);
@@ -2194,11 +2195,11 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 		FREE_RASTER_RESOURCES
 		FREE_COMPUTE_RESOURCES
 		memdelete(rd);
-		if (rcd != nullptr) {
-			memdelete(rcd);
-		}
+		if (rcd != nullptr) { memdelete(rcd); }
+		print_line(vformat("SH_PROBE_ONLY_COMPLETE probes=%d textures=0", probe_positions.size()));
 		return BAKE_OK;
 	}
+
 
 #if 0
 	for (int i = 0; i < probe_positions.size(); i++) {

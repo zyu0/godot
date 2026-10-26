@@ -2360,6 +2360,7 @@ void RendererSceneCull::_light_instance_setup_directional_shadow(int p_shadow_in
 			cull.shadows[p_shadow_index].cascades[i].bias_scale = (z_max - z_min_cam);
 			cull.shadows[p_shadow_index].cascades[i].range_begin = z_max - z_vec.dot(p_cam_transform.origin);
 			cull.shadows[p_shadow_index].cascades[i].uv_scale = uv_scale;
+			cull.shadows[p_shadow_index].cascades[i].receiver_rect = Rect2(Vector2((x_min - x_min_cam) * uv_scale.x, (y_min - y_min_cam) * uv_scale.y), Vector2((x_max - x_min) * uv_scale.x, (y_max - y_min) * uv_scale.y));
 		}
 	}
 }
@@ -3487,6 +3488,8 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				}
 				render_shadow_data[max_shadows_used].light = cull.shadows[i].light_instance;
 				render_shadow_data[max_shadows_used].pass = j;
+				render_shadow_data[max_shadows_used].directional_receiver_rect = c.receiver_rect;
+				light_culler->get_directional_caster_planes(i, j, render_shadow_data[max_shadows_used].caster_cull_planes);
 				render_shadow_data[max_shadows_used].instances.merge_unordered(scene_cull_result.directional_shadows[i].cascade_geometry_instances[j]);
 				max_shadows_used++;
 			}
@@ -3711,6 +3714,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 
 	for (uint32_t i = 0; i < max_shadows_used; i++) {
 		render_shadow_data[i].instances.clear();
+		render_shadow_data[i].caster_cull_planes.clear();
 	}
 	max_shadows_used = 0;
 

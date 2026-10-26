@@ -259,6 +259,7 @@ public:
 		bool uses_normal = false;
 		bool uses_tangent = false;
 		bool writes_tangent = false;
+		bool writes_light_vertex = false;
 		bool uses_particle_trails = false;
 		bool uses_normal_map = false;
 		bool uses_bent_normal_map = false;
@@ -276,6 +277,8 @@ public:
 		bool uses_vertex_time = false;
 		bool uses_fragment_time = false;
 		bool writes_modelview_or_projection = false;
+		bool writes_position = false;
+		bool uses_skip_vertex_transform = false;
 		bool uses_world_coordinates = false;
 
 		bool stencil_enabled = false;

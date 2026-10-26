@@ -32,6 +32,7 @@
 
 #include "core/config/project_settings.h"
 #include "core/object/class_db.h"
+#include "core/object/ref_counted.h"
 #include "core/variant/typed_array.h"
 
 void PhysicsServer3DRenderingServerHandler::set_vertex(int p_vertex_id, const Vector3 &p_vertex) {
@@ -903,6 +904,10 @@ void PhysicsServer3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("soft_body_pin_point", "body", "point_index", "pin"), &PhysicsServer3D::soft_body_pin_point);
 
 	ClassDB::bind_method(D_METHOD("soft_body_is_point_pinned", "body", "point_index"), &PhysicsServer3D::soft_body_is_point_pinned);
+
+	ClassDB::bind_method(D_METHOD("soft_body_set_extra_property", "body", "name", "value"), &PhysicsServer3D::soft_body_set_extra_property);
+	ClassDB::bind_method(D_METHOD("soft_body_get_extra_property", "body", "name"), &PhysicsServer3D::soft_body_get_extra_property);
+	ClassDB::bind_method(D_METHOD("soft_body_get_extra_property_list", "body"), &PhysicsServer3D::soft_body_get_extra_property_list);
 
 	ClassDB::bind_method(D_METHOD("soft_body_apply_point_impulse", "body", "point_index", "impulse"), &PhysicsServer3D::soft_body_apply_point_impulse);
 	ClassDB::bind_method(D_METHOD("soft_body_apply_point_force", "body", "point_index", "force"), &PhysicsServer3D::soft_body_apply_point_force);

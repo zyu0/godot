@@ -39,6 +39,7 @@
 #include "core/math/geometry_3d.h"
 #include "core/object/class_db.h"
 #include "core/object/object.h"
+#include "core/os/os.h"
 #include "scene/3d/light_3d.h"
 #include "scene/3d/lightmap_probe.h"
 #include "scene/3d/mesh_instance_3d.h"
@@ -54,9 +55,7 @@
 #include "servers/display/display_server.h"
 #endif
 
-#if defined(ANDROID_ENABLED) || defined(APPLE_EMBEDDED_ENABLED)
-#include "core/os/os.h"
-#endif
+
 
 void LightmapGIData::add_user(const NodePath &p_path, const Rect2 &p_uv_scale, int p_slice_index, int32_t p_sub_instance) {
 	User user;
@@ -851,7 +850,9 @@ LightmapGI::BakeError LightmapGI::_save_and_reimport_atlas_textures(const Ref<Li
 
 	for (int i = 0; i < texture_count; i++) {
 		const int texture_slice_count = (i == texture_count - 1 && last_count != 0) ? last_count : slices_per_texture;
-		// Native batch callers have no EditorFileSystem import callback.
+		// A script-only tool process has no EditorFileSystem import callback.
+		// Serialize native array textures directly; the baking and filtering are
+		// identical to the editor path, and exports need no image import step.
 		if (ResourceLoader::import == nullptr) {
 			Vector<Ref<Image>> layer_images;
 			for (int j = 0; j < texture_slice_count; j++) {
@@ -864,9 +865,9 @@ LightmapGI::BakeError LightmapGI::_save_and_reimport_atlas_textures(const Ref<Li
 			}
 			Ref<Texture2DArray> texture;
 			texture.instantiate();
-			ERR_FAIL_COND_V(texture->create_from_images(layer_images) != OK, BAKE_ERROR_CANT_CREATE_IMAGE);
+			ERR_FAIL_COND_V(texture->create_from_images(layer_images) != OK, LightmapGI::BAKE_ERROR_CANT_CREATE_IMAGE);
 			const String native_path = p_base_name + (texture_count > 1 ? "_" + itos(i) : "") + ".res";
-			ERR_FAIL_COND_V(ResourceSaver::save(texture, native_path, ResourceSaver::FLAG_COMPRESS) != OK, BAKE_ERROR_CANT_CREATE_IMAGE);
+			ERR_FAIL_COND_V(ResourceSaver::save(texture, native_path, ResourceSaver::FLAG_COMPRESS) != OK, LightmapGI::BAKE_ERROR_CANT_CREATE_IMAGE);
 			texture->set_path(native_path);
 			r_textures[i] = texture;
 			continue;
@@ -1553,9 +1554,9 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 	Ref<LightmapGIData> gi_data;
 
 	if (p_probes_only) {
+		// Preserve the old resource/node on a failed save, but reuse valid capture
+		// topology when the probe positions have not changed.
 		gi_data.instantiate();
-		// A failed save must not change the node's existing capture. Field
-		// export does not use capture topology at all.
 		if (!p_probe_field_only && get_light_data().is_valid()) {
 			Ref<LightmapGIData> previous = get_light_data();
 			gi_data->set_capture_data(previous->get_capture_bounds(), previous->is_interior(), previous->get_capture_points(), previous->get_capture_sh(), previous->get_capture_tetrahedra(), previous->get_capture_bsp_tree(), previous->get_baked_exposure(), previous->get_lightprobe_hash());
@@ -1618,6 +1619,8 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 	}
 
 	if (p_probe_field_only) {
+		// A field consumer supplies its own interpolation. Do not construct or
+		// publish incomplete native capture data merely to transport raw SH.
 		Dictionary data;
 		data["points"] = Vector<Vector3>(probe_points);
 		data["sh"] = Vector<Color>(probe_sh);

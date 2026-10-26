@@ -348,6 +348,7 @@ void Light3D::_validate_property(PropertyInfo &p_property) const {
 }
 
 void Light3D::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("get_light_rid"), &Light3D::get_light_rid);
 	ClassDB::bind_method(D_METHOD("set_editor_only", "editor_only"), &Light3D::set_editor_only);
 	ClassDB::bind_method(D_METHOD("is_editor_only"), &Light3D::is_editor_only);
 

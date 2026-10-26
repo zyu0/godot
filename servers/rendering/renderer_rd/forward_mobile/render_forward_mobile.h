@@ -31,6 +31,7 @@
 #pragma once
 
 #include "core/templates/paged_allocator.h"
+#include "shadow_instance_culling.h"
 #include "servers/rendering/multi_uma_buffer.h"
 #include "servers/rendering/renderer_rd/environment/aerial_perspective.h"
 #include "servers/rendering/renderer_rd/forward_mobile/scene_shader_forward_mobile.h"
@@ -52,6 +53,10 @@ private:
 	static RenderForwardMobile *singleton;
 	RendererRD::AerialPerspective aerial_perspective;
 	RendererRD::MobileFog mobile_fog;
+	RendererRD::ShadowInstanceCulling shadow_instance_culling;
+	class RenderStatistics;
+	class RenderStatisticsFrame;
+	Ref<RenderStatisticsFrame> render_statistics_frame;
 
 	/* Scene Shader */
 
@@ -86,6 +91,7 @@ private:
 		GDCLASS(RenderBufferDataForwardMobile, RenderBufferCustomDataRD);
 
 	public:
+		Ref<RenderStatistics> statistics;
 		enum FramebufferConfigType {
 			FB_CONFIG_RENDER_PASS, // Single pass framebuffer for normal rendering.
 			FB_CONFIG_RENDER_AND_POST_PASS, // Two subpasses, one for normal rendering, one for post processing.
@@ -146,6 +152,9 @@ private:
 		uint32_t subpass = 0;
 		bool use_material_feedback = false;
 		bool defer_opaque_fog = false;
+		Rect2i shadow_scissor; // Local to the unchanged draw-list viewport.
+		const RendererRD::ShadowInstanceCulling::Draw *shadow_cull_draws = nullptr;
+		const Vector<RendererRD::ShadowInstanceCulling::LODDraw> *shadow_lod_draws = nullptr;
 
 		RenderListParameters(GeometryInstanceSurfaceDataCache **p_elements, RenderElementInfo *p_element_info, int p_element_count, bool p_reverse_cull, PassMode p_pass_mode, RID p_render_pass_uniform_set, SceneShaderForwardMobile::ShaderSpecialization p_base_specialization, bool p_force_wireframe = false, const Vector2 &p_uv_offset = Vector2(), float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, uint32_t p_view_count = 1, uint32_t p_element_offset = 0, bool p_use_material_feedback = false) {
 			elements = p_elements;
@@ -168,9 +177,9 @@ private:
 
 	/* Render shadows */
 
-	void _render_shadow_pass(RID p_light, RID p_shadow_atlas, int p_pass, const PagedArray<RenderGeometryInstance *> &p_instances, float p_lod_distance_multiplier = 0, float p_screen_mesh_lod_threshold = 0.0, bool p_open_pass = true, bool p_close_pass = true, bool p_clear_region = true, RenderingServerTypes::RenderInfo *p_render_info = nullptr, const Transform3D &p_main_cam_transform = Transform3D());
+	void _render_shadow_pass(RID p_light, RID p_shadow_atlas, int p_pass, const PagedArray<RenderGeometryInstance *> &p_instances, float p_lod_distance_multiplier = 0, float p_screen_mesh_lod_threshold = 0.0, bool p_open_pass = true, bool p_close_pass = true, bool p_clear_region = true, RenderingServerTypes::RenderInfo *p_render_info = nullptr, const Transform3D &p_main_cam_transform = Transform3D(), const Vector<Plane> *p_caster_planes = nullptr, const Rect2 *p_receiver_rect = nullptr);
 	void _render_shadow_begin();
-	void _render_shadow_append(RID p_framebuffer, const PagedArray<RenderGeometryInstance *> &p_instances, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, float p_bias, float p_normal_bias, bool p_use_dp, bool p_use_dp_flip, bool p_use_pancake, float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, const Rect2i &p_rect = Rect2i(), bool p_flip_y = false, bool p_clear_region = true, bool p_begin = true, bool p_end = true, RenderingServerTypes::RenderInfo *p_render_info = nullptr, const Transform3D &p_main_cam_transform = Transform3D());
+	void _render_shadow_append(RID p_framebuffer, const PagedArray<RenderGeometryInstance *> &p_instances, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, float p_bias, float p_normal_bias, bool p_use_dp, bool p_use_dp_flip, bool p_use_pancake, float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, const Rect2i &p_rect = Rect2i(), bool p_flip_y = false, bool p_clear_region = true, bool p_begin = true, bool p_end = true, RenderingServerTypes::RenderInfo *p_render_info = nullptr, const Transform3D &p_main_cam_transform = Transform3D(), const Vector<Plane> *p_caster_planes = nullptr);
 	void _render_shadow_process();
 	void _render_shadow_end();
 
@@ -180,6 +189,7 @@ private:
 	void _pre_opaque_render(RenderDataRD *p_render_data);
 
 	uint64_t lightmap_texture_array_version = 0xFFFFFFFF;
+	uint64_t baked_texture_version = UINT64_MAX;
 
 	void _update_render_base_uniform_set();
 
@@ -219,6 +229,9 @@ private:
 			uint32_t base_index;
 			uint32_t multimesh_motion_vectors_current_offset;
 			uint32_t multimesh_motion_vectors_previous_offset;
+			uint32_t shadow_instance_remap_base = 0;
+			uint32_t shadow_instance_original_id_base = 0;
+			uint32_t shadow_culling_padding[2] = {};
 			PushConstantUbershader ubershader;
 		};
 
@@ -293,6 +306,7 @@ private:
 
 		MultiUmaBuffer<1u> instance_buffer[RENDER_LIST_MAX] = { MultiUmaBuffer<1u>("RENDER_LIST_OPAQUE"), MultiUmaBuffer<1u>("RENDER_LIST_ALPHA"), MultiUmaBuffer<1u>("RENDER_LIST_SECONDARY") };
 		InstanceData *curr_gpu_ptr[RENDER_LIST_MAX] = {};
+		Vector<InstanceData> shadow_instance_keys; // CPU-only canonical grouping keys.
 
 		// !BAS! We need to change lightmaps, we're not going to do this with a buffer but pushing the used lightmap in
 		LightmapData lightmaps[MAX_LIGHTMAPS];
@@ -312,6 +326,8 @@ private:
 		bool used_opaque_stencil = false;
 
 		struct ShadowPass {
+			Vector<RendererRD::ShadowInstanceCulling::Draw> cull_draws;
+			Vector<Vector<RendererRD::ShadowInstanceCulling::LODDraw>> lod_draws;
 			uint32_t element_from;
 			uint32_t element_count;
 			bool flip_cull;
@@ -323,6 +339,7 @@ private:
 
 			RID framebuffer;
 			Rect2i rect;
+			Rect2i receiver_sample_rect; // Absolute atlas pixels, including filter/bias footprint.
 			bool clear_depth;
 		};
 
@@ -704,6 +721,12 @@ public:
 
 	GlobalPipelineData global_pipeline_data_compiled = {};
 	GlobalPipelineData global_pipeline_data_required = {};
+
+	// MobileFog owns these exact framebuffer layouts. Warm their opaque masks
+	// through the same mesh/surface path before a new receiver becomes visible.
+	Mutex fog_pipeline_formats_mutex;
+	Vector<Pair<RD::FramebufferFormatID, uint32_t>> fog_pipeline_framebuffer_formats;
+	bool fog_pipeline_formats_dirty = false;
 
 	typedef Pair<SceneShaderForwardMobile::ShaderData *, SceneShaderForwardMobile::ShaderData::PipelineKey> ShaderPipelinePair;
 

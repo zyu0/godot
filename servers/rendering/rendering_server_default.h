@@ -436,6 +436,7 @@ public:
 	FUNC3(multimesh_instance_set_custom_data, RID, int, const Color &)
 
 	FUNC2(multimesh_set_custom_aabb, RID, const AABB &)
+	FUNC2(multimesh_set_shadow_culling_aabb, RID, const AABB &)
 	FUNC1RC(AABB, multimesh_get_custom_aabb, RID)
 
 	FUNC1RC(RID, multimesh_get_mesh, RID)
@@ -487,6 +488,8 @@ public:
 	FUNC3(light_set_param, RID, RSE::LightParam, float)
 	FUNC2(light_set_shadow, RID, bool)
 	FUNC2(light_set_projector, RID, RID)
+	FUNC6R(bool, light_directional_set_baked_shadow, RID, const Ref<Image> &, const Transform3D &, const Vector3 &, const Rect2 &, const Vector4 &)
+	FUNC3R(bool, light_directional_set_baked_visibility, RID, RID, uint32_t)
 	FUNC2(light_set_negative, RID, bool)
 	FUNC2(light_set_cull_mask, RID, uint32_t)
 	FUNC5(light_set_distance_fade, RID, bool, float, float, float)

@@ -80,6 +80,9 @@ vec4 native_height_fog_process(vec3 vertex) {
  mat4 world_from_view = transpose(mat4(scene_data.inv_view_matrix[0], scene_data.inv_view_matrix[1], scene_data.inv_view_matrix[2], vec4(0.0, 0.0, 0.0, 1.0)));
  vec3 segment = vertex - origin_view;
  float distance_to_surface = length(segment);
+ // The finite integral is exactly identity before its authored start distance.
+ // Skip sky capture sampling and directional scattering for these pixels.
+ if (distance_to_surface <= scene_data.height_fog.density.w) return vec4(0.0, 0.0, 0.0, 1.0);
  vec3 view_ray = distance_to_surface > 0.0 ? segment / distance_to_surface : vec3(0.0, 0.0, -1.0);
  vec3 ray = normalize(mat3(world_from_view) * view_ray);
  vec3 origin = (world_from_view * vec4(origin_view, 1.0)).xyz;

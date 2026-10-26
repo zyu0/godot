@@ -278,6 +278,7 @@ private:
 
 	BakeError _save_and_reimport_atlas_textures(const Ref<Lightmapper> p_lightmapper, const String &p_base_name, TypedArray<TextureLayered> &r_textures, bool p_is_shadowmask = false) const;
 	void _build_area_light_texture_atlas(const Vector<LightmapGI::LightsFound> &lights_found, HashMap<Ref<Texture2D>, AreaLightAtlasTexture> &r_texture_rects, Size2i &r_atlas_size, int &r_mipmaps) const;
+
 	BakeError _bake_from_scene(Node *p_from_node, const String &p_image_data_path, bool p_probes_only, bool p_probe_field_only = false);
 
 protected:
@@ -355,6 +356,7 @@ public:
 	AABB get_aabb() const override;
 
 	BakeError bake(Node *p_from_node, String p_image_data_path = "", Lightmapper::BakeStepFunc p_bake_step = nullptr, void *p_bake_userdata = nullptr, bool p_probes_only = false, bool p_probe_field_only = false);
+	// Batch-tool entry to the same native baker used by the editor toolbar.
 	BakeError bake_from_scene(Node *p_from_node, const String &p_image_data_path);
 	BakeError bake_probes_from_scene(Node *p_from_node, const String &p_image_data_path);
 	BakeError bake_probe_field_from_scene(Node *p_from_node, const String &p_image_data_path);

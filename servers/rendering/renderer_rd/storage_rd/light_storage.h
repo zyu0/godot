@@ -63,6 +63,14 @@ private:
 		float param[RSE::LIGHT_PARAM_MAX];
 		Color color = Color(1, 1, 1, 1);
 		RID projector;
+		RID baked_depth; // Owned reverse-Z comparison texture.
+		RID baked_visibility; // Borrowed RS texture; resolved again per view.
+		Transform3D baked_world_to_light;
+		Vector3 baked_projection;
+		Rect2 baked_coverage;
+		Vector4 baked_options; // bias metres, radius texels, hybrid start/end metres.
+		uint32_t baked_receiver_mask = 0;
+		uint32_t baked_resolution = 0;
 		bool shadow = false;
 		bool negative = false;
 		bool reverse_cull = false;
@@ -222,11 +230,20 @@ private:
 		float uv_scale2[2];
 		float uv_scale3[2];
 		float uv_scale4[2];
+		float baked_view_to_light[16];
+		float baked_view_to_world[16];
+		float baked_projection[4];
+		float baked_coverage[4];
+		float baked_options[4];
+		uint32_t baked_flags[4];
 	};
 
 	uint32_t max_directional_lights;
 	DirectionalLightData *directional_lights = nullptr;
 	RID directional_light_buffer;
+	Vector<RID> baked_depth_textures;
+	Vector<RID> baked_visibility_textures;
+	uint64_t baked_texture_version = 0;
 
 	/* REFLECTION PROBE */
 
@@ -505,6 +522,8 @@ public:
 	virtual void light_set_param(RID p_light, RSE::LightParam p_param, float p_value) override;
 	virtual void light_set_shadow(RID p_light, bool p_enabled) override;
 	virtual void light_set_projector(RID p_light, RID p_texture) override;
+	virtual bool light_directional_set_baked_shadow(RID p_light, const Ref<Image> &p_image, const Transform3D &p_world_to_light, const Vector3 &p_projection, const Rect2 &p_coverage, const Vector4 &p_options) override;
+	virtual bool light_directional_set_baked_visibility(RID p_light, RID p_texture, uint32_t p_receiver_mask) override;
 	virtual void light_set_negative(RID p_light, bool p_enable) override;
 	virtual void light_set_cull_mask(RID p_light, uint32_t p_mask) override;
 	virtual void light_set_distance_fade(RID p_light, bool p_enabled, float p_begin, float p_shadow, float p_length) override;
@@ -833,6 +852,9 @@ public:
 	RID get_spot_light_buffer() { return spot_light_buffer; }
 	RID get_area_light_buffer() { return area_light_buffer; }
 	RID get_directional_light_buffer() { return directional_light_buffer; }
+	const Vector<RID> &get_baked_depth_textures() const { return baked_depth_textures; }
+	const Vector<RID> &get_baked_visibility_textures() const { return baked_visibility_textures; }
+	uint64_t get_baked_texture_version() const { return baked_texture_version; }
 	uint32_t get_max_directional_lights() { return max_directional_lights; }
 	uint32_t get_directional_light_blend_splits(uint32_t p_directional_light_count) const {
 		uint32_t blend_splits = 0;

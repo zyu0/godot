@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/io/image.h"
 #include "servers/rendering/rendering_server_enums.h"
 #include "servers/rendering/storage/render_scene_buffers.h"
 
@@ -57,6 +58,8 @@ public:
 	virtual void light_set_param(RID p_light, RSE::LightParam p_param, float p_value) = 0;
 	virtual void light_set_shadow(RID p_light, bool p_enabled) = 0;
 	virtual void light_set_projector(RID p_light, RID p_texture) = 0;
+	virtual bool light_directional_set_baked_shadow(RID p_light, const Ref<Image> &p_image, const Transform3D &p_world_to_light, const Vector3 &p_projection, const Rect2 &p_coverage, const Vector4 &p_options) { return false; }
+	virtual bool light_directional_set_baked_visibility(RID p_light, RID p_texture, uint32_t p_receiver_mask) { return false; }
 	virtual void light_set_negative(RID p_light, bool p_enable) = 0;
 	virtual void light_set_cull_mask(RID p_light, uint32_t p_mask) = 0;
 	virtual void light_set_distance_fade(RID p_light, bool p_enabled, float p_begin, float p_shadow, float p_length) = 0;

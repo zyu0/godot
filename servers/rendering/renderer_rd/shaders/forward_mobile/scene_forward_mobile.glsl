@@ -10,6 +10,22 @@
 /* Include our forward mobile UBOs definitions etc. */
 #include "scene_forward_mobile_inc.glsl"
 
+uint instance_record_index() {
+	if (draw_call.shadow_instance_remap_base != 0u) {
+		uint word_index = draw_call.shadow_instance_remap_base + uint(INSTANCE_INDEX);
+		return floatBitsToUint(transforms.data[word_index >> 2u][word_index & 3u]);
+	}
+	return uint(INSTANCE_INDEX);
+}
+
+uint original_instance_index() {
+	if (draw_call.shadow_instance_original_id_base != 0u) {
+		uint word_index = draw_call.shadow_instance_original_id_base + uint(INSTANCE_INDEX);
+		return floatBitsToUint(transforms.data[word_index >> 2u][word_index & 3u]);
+	}
+	return instance_record_index();
+}
+
 #define SHADER_IS_SRGB false
 #define SHADER_SPACE_FAR 0.0
 
@@ -350,7 +366,7 @@ void vertex_shader(in vec3 vertex,
 
 #else
 		uint stride = multimesh_stride();
-		uint offset = stride * (INSTANCE_INDEX + multimesh_offset);
+		uint offset = stride * (instance_record_index() + multimesh_offset);
 
 		if (sc_multimesh_format_2d()) {
 			matrix = mat4(transforms.data[offset + 0], transforms.data[offset + 1], vec4(0.0, 0.0, 1.0, 0.0), vec4(0.0, 0.0, 0.0, 1.0));
@@ -948,6 +964,7 @@ vec4 textureArray_bicubic(texture2DArray tex, vec3 uv, vec2 texture_size) {
 	return (g0(fuv.y) * (g0x * texture(sampler2DArray(tex, SAMPLER_LINEAR_CLAMP), vec3(p0, uv.z)) + g1x * texture(sampler2DArray(tex, SAMPLER_LINEAR_CLAMP), vec3(p1, uv.z)))) +
 			(g1(fuv.y) * (g0x * texture(sampler2DArray(tex, SAMPLER_LINEAR_CLAMP), vec3(p2, uv.z)) + g1x * texture(sampler2DArray(tex, SAMPLER_LINEAR_CLAMP), vec3(p3, uv.z))));
 }
+
 #endif //USE_LIGHTMAP
 
 #ifdef USE_MULTIVIEW
@@ -1040,6 +1057,7 @@ layout(location = 1) out float fog_eligibility;
 #endif
 
 #include "../scene_forward_lights_inc.glsl"
+#include "../baked_directional_shadow_inc.glsl"
 
 #endif //!defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED) && !defined(USE_VERTEX_LIGHTING)
 
@@ -1397,7 +1415,9 @@ void main() {
 	alpha = half(1.0);
 #endif
 
-#ifdef ALPHA_ANTIALIASING_EDGE_USED
+// Material capture stores opacity for ray tracing, not MSAA sample coverage.
+// Preserve the native scissor/hash result instead of widening it in UV space.
+#if defined(ALPHA_ANTIALIASING_EDGE_USED) && !defined(MODE_RENDER_MATERIAL)
 // If alpha scissor is used, we must further the edge threshold, otherwise we won't get any edge feather
 #ifdef ALPHA_SCISSOR_USED
 	alpha_antialiasing_edge = clamp(alpha_scissor_threshold + alpha_antialiasing_edge, half(0.0), half(1.0));
@@ -2101,12 +2121,26 @@ void main() {
 					}
 #endif
 
-#ifdef USE_VERTEX_LIGHTING
-					diffuse_light *= mix(half(1.0), shadow, half(diffuse_light_interp.a));
-					direct_specular_light *= mix(half(1.0), shadow, half(specular_light_interp.a));
-#endif
+
 #undef BIAS_FUNC
 				}
+
+#ifdef USE_LIGHTMAP
+				if (shadowmask_mode == LIGHTMAP_SHADOWMASK_MODE_NONE)
+#endif
+				{
+					half baked_shadow = half(sample_baked_directional_shadow(i, vertex, instances.data[draw_call.instance_index].layer_mask));
+#ifdef USE_VERTEX_LIGHTING
+					// Preserve existing realtime/LightmapGI vertex attenuation exactly.
+					baked_shadow = mix(half(1.0), baked_shadow, half(directional_lights.data[i].shadow_opacity));
+#endif
+					shadow = min(shadow, baked_shadow);
+				}
+#ifdef USE_VERTEX_LIGHTING
+				half vertex_shadow = shadow;
+				diffuse_light *= mix(half(1.0), vertex_shadow, half(diffuse_light_interp.a));
+				direct_specular_light *= mix(half(1.0), vertex_shadow, half(specular_light_interp.a));
+#endif
 
 				shadows[i] = shadow;
 			}

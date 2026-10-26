@@ -34,6 +34,8 @@
 
 class InputEvent;
 class NativeMenu;
+class RenderingContextDriver;
+class RenderingDevice;
 
 class DisplayServerHeadless : public DisplayServer {
 	GDSOFTCLASS(DisplayServerHeadless, DisplayServer);
@@ -44,6 +46,14 @@ private:
 	static Vector<String> get_rendering_drivers_func() {
 		Vector<String> drivers;
 		drivers.push_back("dummy");
+#if defined(TOOLS_ENABLED) && defined(RD_ENABLED)
+#ifdef VULKAN_ENABLED
+		drivers.push_back("vulkan");
+#endif
+#ifdef METAL_ENABLED
+		drivers.push_back("metal");
+#endif
+#endif
 		return drivers;
 	}
 
@@ -54,6 +64,11 @@ private:
 
 	NativeMenu *native_menu = nullptr;
 	Callable input_event_callback;
+#if defined(TOOLS_ENABLED) && defined(RD_ENABLED)
+	RenderingContextDriver *rendering_context = nullptr;
+	RenderingDevice *rendering_device = nullptr;
+	Size2i offscreen_size;
+#endif
 
 public:
 	bool has_feature(DisplayServerEnums::Feature p_feature) const override { return false; }
@@ -115,8 +130,17 @@ public:
 	void window_set_min_size(const Size2i p_size, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {}
 	Size2i window_get_min_size(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override { return Size2i(); }
 
-	void window_set_size(const Size2i p_size, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {}
-	Size2i window_get_size(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override { return Size2i(); }
+	void window_set_size(const Size2i p_size, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {
+#if defined(TOOLS_ENABLED) && defined(RD_ENABLED)
+		if (rendering_device) { offscreen_size = p_size; }
+#endif
+	}
+	Size2i window_get_size(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override {
+#if defined(TOOLS_ENABLED) && defined(RD_ENABLED)
+		if (rendering_device) { return offscreen_size; }
+#endif
+		return Size2i();
+	}
 	Size2i window_get_size_with_decorations(DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) const override { return Size2i(); }
 
 	void window_set_mode(DisplayServerEnums::WindowMode p_mode, DisplayServerEnums::WindowID p_window = DisplayServerEnums::MAIN_WINDOW_ID) override {}

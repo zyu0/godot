@@ -3188,14 +3188,43 @@ void RenderForwardClustered::base_uniforms_changed() {
 void RenderForwardClustered::_update_render_base_uniform_set() {
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 
-	if (render_base_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(render_base_uniform_set) || (lightmap_texture_array_version != light_storage->lightmap_array_get_version())) {
+	if (render_base_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(render_base_uniform_set) || (lightmap_texture_array_version != light_storage->lightmap_array_get_version()) || baked_texture_version != light_storage->get_baked_texture_version()) {
 		if (render_base_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(render_base_uniform_set)) {
 			RD::get_singleton()->free_rid(render_base_uniform_set);
 		}
 
 		lightmap_texture_array_version = light_storage->lightmap_array_get_version();
+		baked_texture_version = light_storage->get_baked_texture_version();
 
 		Vector<RD::Uniform> uniforms;
+
+		{
+			RD::Uniform u;
+			u.binding = 21;
+			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+			for (RID texture : light_storage->get_baked_depth_textures()) {
+					// Forward+ depth/shadow setup can precede this view's light update.
+					if (!RD::get_singleton()->texture_is_valid(texture)) {
+						texture = RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_DEPTH);
+					}
+					u.append_id(texture);
+				}
+			uniforms.push_back(u);
+		}
+
+		{
+			RD::Uniform u;
+			u.binding = 22;
+			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+			for (RID texture : light_storage->get_baked_visibility_textures()) {
+					// Forward+ depth/shadow setup can precede this view's light update.
+					if (!RD::get_singleton()->texture_is_valid(texture)) {
+						texture = RendererRD::TextureStorage::get_singleton()->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_WHITE);
+					}
+					u.append_id(texture);
+				}
+			uniforms.push_back(u);
+		}
 
 		{
 			RD::Uniform u;

@@ -34,11 +34,51 @@
 #include "core/input/input_event.h"
 #include "servers/display/native_menu.h"
 #include "servers/rendering/dummy/rasterizer_dummy.h"
+#if defined(TOOLS_ENABLED) && defined(RD_ENABLED)
+#include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
+#include "servers/rendering/rendering_device.h"
+#ifdef VULKAN_ENABLED
+#include "drivers/vulkan/rendering_context_driver_vulkan.h"
+#endif
+#ifdef METAL_ENABLED
+#include "drivers/metal/rendering_context_driver_metal.h"
+#endif
+#endif
 
 DisplayServer *DisplayServerHeadless::create_func(const String &p_rendering_driver, DisplayServerEnums::WindowMode p_mode, DisplayServerEnums::VSyncMode p_vsync_mode, uint32_t p_flags, const Vector2i *p_position, const Vector2i &p_resolution, int p_screen, DisplayServerEnums::Context p_context, int64_t p_parent_window, Error &r_error) {
 	r_error = OK;
+	DisplayServerHeadless *server = memnew(DisplayServerHeadless());
+#if defined(TOOLS_ENABLED) && defined(RD_ENABLED)
+	// Keep ordinary headless runs on dummy. An explicit GPU driver opts into
+	// offscreen rendering without creating a native window, surface or swapchain.
+#ifdef VULKAN_ENABLED
+	if (p_rendering_driver == "vulkan") {
+		server->rendering_context = memnew(RenderingContextDriverVulkan);
+	}
+#endif
+#ifdef METAL_ENABLED
+	if (p_rendering_driver == "metal") {
+		server->rendering_context = memnew(RenderingContextDriverMetal);
+	}
+#endif
+	if (server->rendering_context) {
+		server->offscreen_size = p_resolution;
+		r_error = server->rendering_context->initialize();
+		if (r_error == OK) {
+			server->rendering_device = memnew(RenderingDevice);
+			r_error = server->rendering_device->initialize(server->rendering_context);
+		}
+		if (r_error != OK) {
+			memdelete(server);
+			return nullptr;
+		}
+		RendererCompositorRD::make_current();
+		print_line("HEADLESS_GPU_READY driver=" + p_rendering_driver + " windows=0");
+		return server;
+	}
+#endif
 	RasterizerDummy::make_current();
-	return memnew(DisplayServerHeadless());
+	return server;
 }
 
 void DisplayServerHeadless::_dispatch_input_events(const Ref<InputEvent> &p_event) {
@@ -61,6 +101,16 @@ DisplayServerHeadless::DisplayServerHeadless() {
 }
 
 DisplayServerHeadless::~DisplayServerHeadless() {
+#if defined(TOOLS_ENABLED) && defined(RD_ENABLED)
+	if (rendering_device) {
+		memdelete(rendering_device);
+		rendering_device = nullptr;
+	}
+	if (rendering_context) {
+		memdelete(rendering_context);
+		rendering_context = nullptr;
+	}
+#endif
 	if (native_menu) {
 		memdelete(native_menu);
 		native_menu = nullptr;

@@ -12,6 +12,10 @@
 		<link title="Third Person Shooter (TPS) Demo">https://godotengine.org/asset-library/asset/2710</link>
 	</tutorials>
 	<methods>
+		<method name="get_light_rid" qualifiers="const">
+			<return type="RID" />
+			<description>Returns the light resource RID used by [RenderingServer] light methods. The node owns this RID; do not free it.</description>
+		</method>
 		<method name="get_correlated_color" qualifiers="const">
 			<return type="Color" />
 			<description>

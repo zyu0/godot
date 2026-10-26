@@ -33,6 +33,7 @@
 #include "core/config/project_settings.h"
 #include "core/math/geometry_3d.h"
 #include "core/os/os.h"
+#include "core/io/marshalls.h"
 #include "servers/rendering/renderer_rd/environment/physical_sky_view.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
@@ -206,6 +207,9 @@ void LightStorage::light_free(RID p_rid) {
 
 	// delete the texture
 	Light *light = light_owner.get_or_null(p_rid);
+	if (light->baked_depth.is_valid()) {
+		RD::get_singleton()->free_rid(light->baked_depth);
+	}
 	light->dependency.deleted_notify(p_rid);
 	light_owner.free(p_rid);
 }
@@ -710,6 +714,12 @@ void LightStorage::set_max_lights(const uint32_t p_max_lights) {
 	uint32_t directional_light_buffer_size = max_directional_lights * sizeof(DirectionalLightData);
 	directional_lights = memnew_arr(DirectionalLightData, max_directional_lights);
 	directional_light_buffer = RD::get_singleton()->uniform_buffer_create(directional_light_buffer_size);
+	baked_depth_textures.resize(max_directional_lights);
+	baked_visibility_textures.resize(max_directional_lights);
+	for (uint32_t i = 0; i < max_directional_lights; i++) {
+		baked_depth_textures.write[i] = TextureStorage::get_singleton()->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_DEPTH);
+		baked_visibility_textures.write[i] = TextureStorage::get_singleton()->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_WHITE);
+	}
 }
 
 void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const PagedArray<RID> &p_lights, const Transform3D &p_camera_transform, RID p_shadow_atlas, bool p_using_shadows, uint32_t &r_directional_light_count, uint32_t &r_positional_light_count, bool &r_directional_light_soft_shadows) {
@@ -726,6 +736,14 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 	area_light_count = 0;
 
 	r_directional_light_soft_shadows = false;
+	Vector<RID> next_baked_depth;
+	Vector<RID> next_baked_visibility;
+	next_baked_depth.resize(max_directional_lights);
+	next_baked_visibility.resize(max_directional_lights);
+	for (uint32_t i = 0; i < max_directional_lights; i++) {
+		next_baked_depth.write[i] = texture_storage->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_DEPTH);
+		next_baked_visibility.write[i] = texture_storage->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_WHITE);
+	}
 
 	for (int i = 0; i < (int)p_lights.size(); i++) {
 		LightInstance *light_instance = light_instance_owner.get_or_null(p_lights[i]);
@@ -744,6 +762,30 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 
 				DirectionalLightData &light_data = directional_lights[r_directional_light_count];
 
+				memset(light_data.baked_flags, 0, sizeof(light_data.baked_flags));
+				if (light->baked_depth.is_valid() && p_using_shadows && light->shadow) {
+					light_data.baked_flags[0] = 1;
+					next_baked_depth.write[r_directional_light_count] = light->baked_depth;
+					MaterialStorage::store_transform(light->baked_world_to_light * p_camera_transform, light_data.baked_view_to_light);
+					MaterialStorage::store_transform(p_camera_transform, light_data.baked_view_to_world);
+					for (int j = 0; j < 3; j++) { light_data.baked_projection[j] = light->baked_projection[j]; }
+					light_data.baked_projection[3] = 1.0f / light->baked_resolution;
+					light_data.baked_coverage[0] = light->baked_coverage.position.x;
+					light_data.baked_coverage[1] = light->baked_coverage.position.y;
+					light_data.baked_coverage[2] = light->baked_coverage.size.x;
+					light_data.baked_coverage[3] = light->baked_coverage.size.y;
+					for (int j = 0; j < 4; j++) { light_data.baked_options[j] = light->baked_options[j]; }
+					if (texture_storage->owns_texture(light->baked_visibility)) {
+						RID visibility = texture_storage->texture_get_rd_texture(light->baked_visibility);
+						if (visibility.is_valid() && RD::get_singleton()->texture_is_valid(visibility)) {
+							const RD::TextureFormat format = RD::get_singleton()->texture_get_format(visibility);
+							if (format.texture_type == RD::TEXTURE_TYPE_2D && format.format == RD::DATA_FORMAT_R8_UNORM) {
+								next_baked_visibility.write[r_directional_light_count] = visibility;
+								light_data.baked_flags[1] = light->baked_receiver_mask;
+							}
+						}
+					}
+				}
 				Transform3D light_transform = light_instance->transform;
 
 				Vector3 direction = inverse_transform.basis.xform(light_transform.basis.xform(Vector3(0, 0, 1))).normalized();
@@ -1257,6 +1299,11 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 		RD::get_singleton()->buffer_update(area_light_buffer, 0, sizeof(LightData) * area_light_count, area_lights);
 	}
 
+	if (next_baked_depth != baked_depth_textures || next_baked_visibility != baked_visibility_textures) {
+		baked_depth_textures = next_baked_depth;
+		baked_visibility_textures = next_baked_visibility;
+		baked_texture_version++;
+	}
 	if (r_directional_light_count) {
 		RD::get_singleton()->buffer_update(directional_light_buffer, 0, sizeof(DirectionalLightData) * r_directional_light_count, directional_lights);
 	}
@@ -2893,4 +2940,76 @@ bool LightStorage::get_shadow_cubemaps_used() const {
 
 bool LightStorage::get_shadow_dual_paraboloid_used() const {
 	return shadow_dual_paraboloid_used;
+}
+
+bool LightStorage::light_directional_set_baked_shadow(RID p_light, const Ref<Image> &p_image, const Transform3D &p_world_to_light, const Vector3 &p_projection, const Rect2 &p_coverage, const Vector4 &p_options) {
+	Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_COND_V(!light || light->type != RSE::LIGHT_DIRECTIONAL, false);
+	RD *rd = RD::get_singleton();
+	if (p_image.is_null()) {
+		if (light->baked_depth.is_valid()) { rd->free_rid(light->baked_depth); }
+		light->baked_depth = RID();
+		return true;
+	}
+	ERR_FAIL_COND_V(p_image->is_empty() || p_image->get_format() != Image::FORMAT_RG8 || p_image->has_mipmaps() || p_image->get_width() != p_image->get_height(), false);
+	ERR_FAIL_COND_V(!p_world_to_light.is_finite() || Math::is_zero_approx(p_world_to_light.basis.determinant()) || !p_projection.is_finite() || !p_coverage.is_finite() || !p_options.is_finite(), false);
+	ERR_FAIL_COND_V(p_projection.x <= 0 || p_projection.z <= 0 || p_coverage.size.x <= 0 || p_coverage.size.y <= 0 || p_options.x < 0 || p_options.y < 0 || p_options.y > 8 || p_options.z < 0 || p_options.w < p_options.z, false);
+	ERR_FAIL_COND_V(p_image->get_width() > int(rd->limit_get(RD::LIMIT_MAX_TEXTURE_SIZE_2D)), false);
+	// Both renderers already require >64 textures for native lightmap arrays.
+	ERR_FAIL_COND_V(rd->limit_get(RD::LIMIT_MAX_TEXTURES_PER_SHADER_STAGE) < 128, false);
+	RD::TextureFormat format;
+	format.texture_type = RD::TEXTURE_TYPE_2D;
+	format.width = p_image->get_width();
+	format.height = p_image->get_height();
+	format.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT;
+	format.format = RD::DATA_FORMAT_D16_UNORM;
+	if (!rd->texture_is_format_supported_for_usage(format.format, format.usage_bits)) {
+		format.format = RD::DATA_FORMAT_D32_SFLOAT;
+	}
+	ERR_FAIL_COND_V(!rd->texture_is_format_supported_for_usage(format.format, format.usage_bits), false);
+	const Vector<uint8_t> source = p_image->get_data();
+	Vector<uint8_t> bytes;
+	const bool d16 = format.format == RD::DATA_FORMAT_D16_UNORM;
+	const int count = format.width * format.height;
+	bytes.resize(count * (d16 ? 2 : 4));
+	uint8_t *out = bytes.ptrw();
+	const uint8_t *in = source.ptr();
+	for (int i = 0; i < count; i++) {
+		const uint16_t depth = 65535 - ((uint16_t(in[2 * i]) << 8) | in[2 * i + 1]);
+		if (d16) { encode_uint16(depth, out + 2 * i); }
+		else { encode_float(float(depth) / 65535.0f, out + 4 * i); }
+	}
+	// Depth aspect requires attachment usage; initial attachment data is forbidden.
+	RID replacement = rd->texture_create(format, RD::TextureView());
+	ERR_FAIL_COND_V(replacement.is_null(), false);
+	if (rd->texture_update(replacement, 0, bytes) != OK) {
+		rd->free_rid(replacement);
+		return false;
+	}
+	RID previous = light->baked_depth;
+	light->baked_depth = replacement;
+	light->baked_world_to_light = p_world_to_light;
+	light->baked_projection = p_projection;
+	light->baked_coverage = p_coverage;
+	light->baked_options = p_options;
+	light->baked_resolution = format.width;
+	if (previous.is_valid()) { rd->free_rid(previous); }
+	if (!d16) { WARN_PRINT("Baked directional shadow uses D32 fallback (4 bytes/texel)."); }
+	return true;
+}
+
+bool LightStorage::light_directional_set_baked_visibility(RID p_light, RID p_texture, uint32_t p_receiver_mask) {
+	Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_COND_V(!light || light->type != RSE::LIGHT_DIRECTIONAL, false);
+	if (p_texture.is_valid()) {
+		TextureStorage *textures = TextureStorage::get_singleton();
+		ERR_FAIL_COND_V(!textures->owns_texture(p_texture) || p_receiver_mask == 0, false);
+		RID texture = textures->texture_get_rd_texture(p_texture);
+		ERR_FAIL_COND_V(texture.is_null() || !RD::get_singleton()->texture_is_valid(texture), false);
+		const RD::TextureFormat format = RD::get_singleton()->texture_get_format(texture);
+		ERR_FAIL_COND_V(format.texture_type != RD::TEXTURE_TYPE_2D || format.format != RD::DATA_FORMAT_R8_UNORM, false);
+	}
+	light->baked_visibility = p_texture;
+	light->baked_receiver_mask = p_receiver_mask;
+	return true;
 }

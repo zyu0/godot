@@ -1101,6 +1101,7 @@ public:
 				real_t bias_scale;
 				real_t range_begin;
 				Vector2 uv_scale;
+				Rect2 receiver_rect; // Unclamped light-space receiver footprint in cascade UVs.
 
 			} cascades[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES]; //max 4 cascades
 			uint32_t cascade_count;

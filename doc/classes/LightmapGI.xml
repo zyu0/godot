@@ -24,20 +24,20 @@
 				Runs the editor's native lightmap baker for [param from_node]. Requires an engine built with the lightmapper module and a real rendering device. Batch callers without an editor import callback save atlas textures as native resources.
 			</description>
 		</method>
-		<method name="bake_probes_from_scene">
-			<return type="int" enum="LightmapGI.BakeError" />
-			<param index="0" name="from_node" type="Node" />
-			<param index="1" name="image_data_path" type="String" />
-			<description>
-				Bakes native probe capture data without surface lightmaps. Requires an explicit output path and [member use_texture_for_bounces] set to [code]false[/code]. Uses the same native probe integration as the full bake; the scene determines the contribution of direct light, emission and environment. Publishes [LightmapGIData] only after a successful save.
-			</description>
-		</method>
 		<method name="bake_probe_field_from_scene">
 			<return type="int" enum="LightmapGI.BakeError" />
 			<param index="0" name="from_node" type="Node" />
 			<param index="1" name="image_data_path" type="String" />
 			<description>
-				Exports raw native SH to an ordinary [Resource], without capture tetrahedra or BSP. Requires an explicit [code].res[/code] path and [member use_texture_for_bounces] set to [code]false[/code]. Metadata [code]schema[/code] is [code]sh_probe_field_v1[/code]; [code]probe_data[/code] contains points, nine SH Colors per point, bounds, interior and baked_exposure. Leaves [member light_data] unchanged. The consumer supplies spatial interpolation.
+				Offline custom-editor entry. Requires an explicit .res path and use_texture_for_bounces=false. Saves a plain Resource with metadata schema="sh_probe_field_v1" and probe_data containing points, sh (nine Color values per point), bounds, interior and baked_exposure. Reuses native probe integration without generating capture tetrahedra or BSP; leaves light_data unchanged. Consumers must provide their own spatial interpolation. Use bake_probes_from_scene when native LightmapGIData capture is required.
+			</description>
+		</method>
+		<method name="bake_probes_from_scene">
+			<return type="int" enum="LightmapGI.BakeError" />
+			<param index="0" name="from_node" type="Node" />
+			<param index="1" name="image_data_path" type="String" />
+			<description>
+				Offline-only native SH probe bake. Requires an explicit output path and use_texture_for_bounces=false. Produces capture data with no lightmap atlases or mesh users, while retaining native material preparation and probe ray integration. The input scene determines whether the SH contains emission/environment or only bounced lighting. Does not update GI at runtime. The original full bake remains unchanged.
 			</description>
 		</method>
 	</methods>

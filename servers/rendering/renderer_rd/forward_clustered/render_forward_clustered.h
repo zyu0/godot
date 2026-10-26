@@ -173,6 +173,7 @@ private:
 	RID render_base_uniform_set;
 
 	uint64_t lightmap_texture_array_version = 0xFFFFFFFF;
+	uint64_t baked_texture_version = UINT64_MAX;
 
 	void _update_render_base_uniform_set();
 	RID _setup_sdfgi_render_pass_uniform_set(RID p_albedo_texture, RID p_emission_texture, RID p_emission_aniso_texture, RID p_geom_facing_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index);

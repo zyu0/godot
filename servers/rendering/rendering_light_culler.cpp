@@ -228,6 +228,19 @@ bool RenderingLightCuller::_prepare_light(const RendererSceneCull::Instance &p_i
 	return true;
 }
 
+void RenderingLightCuller::get_directional_caster_planes(int32_t p_directional_light_id, int32_t p_cascade, Vector<Plane> &r_planes) const {
+	r_planes.clear();
+	if (!data.is_active() || !is_caster_culling_active()) {
+		return;
+	}
+	ERR_FAIL_INDEX(p_directional_light_id, (int32_t)data.directional_cull_planes.size());
+	ERR_FAIL_INDEX(p_cascade, 4);
+	const LightCullPlanes &planes = data.directional_cull_planes[p_directional_light_id].planes[p_cascade];
+	for (int i = 0; i < planes.num_cull_planes; i++) {
+		r_planes.push_back(planes.cull_planes[i]);
+	}
+}
+
 bool RenderingLightCuller::cull_directional_light(const RendererSceneCull::InstanceBounds &p_bound, int32_t p_directional_light_id, int32_t p_cascade) {
 	if (!data.is_active() || !is_caster_culling_active()) {
 		return true;

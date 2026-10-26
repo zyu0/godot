@@ -89,4 +89,10 @@ struct DirectionalLightData {
 	vec2 uv_scale2;
 	vec2 uv_scale3;
 	vec2 uv_scale4;
+	highp mat4 baked_view_to_light;
+	highp mat4 baked_view_to_world;
+	highp vec4 baked_projection;
+	highp vec4 baked_coverage;
+	highp vec4 baked_options;
+	uvec4 baked_flags;
 };

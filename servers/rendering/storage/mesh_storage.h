@@ -138,6 +138,9 @@ public:
 	virtual void multimesh_instance_set_custom_data(RID p_multimesh, int p_index, const Color &p_color);
 
 	virtual void multimesh_set_custom_aabb(RID p_multimesh, const AABB &p_aabb);
+	virtual void multimesh_set_shadow_culling_aabb(RID p_multimesh, const AABB &p_aabb) {
+		if (p_aabb != AABB()) { WARN_PRINT_ONCE("Shadow instance culling requires the Mobile RenderingDevice renderer."); }
+	}
 	virtual AABB multimesh_get_custom_aabb(RID p_multimesh) const;
 
 	virtual RID multimesh_get_mesh(RID p_multimesh) const;

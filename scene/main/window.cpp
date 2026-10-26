@@ -1428,7 +1428,7 @@ void Window::_update_viewport_size() {
 	bool allocate = is_inside_tree() && visible && (window_id != DisplayServerEnums::INVALID_WINDOW_ID || embedder != nullptr);
 	_set_size(final_size, 1, final_size_override, allocate);
 
-	if (window_id != DisplayServerEnums::INVALID_WINDOW_ID) {
+	if (window_id != DisplayServerEnums::INVALID_WINDOW_ID && DisplayServer::get_singleton()->get_name() != "headless") {
 		RenderingServer::get_singleton()->viewport_attach_to_screen(get_viewport_rid(), attach_to_screen_rect, window_id);
 	} else if (!is_embedded()) {
 		RenderingServer::get_singleton()->viewport_attach_to_screen(get_viewport_rid(), Rect2i(), DisplayServerEnums::INVALID_WINDOW_ID);

@@ -1418,6 +1418,32 @@ Error RenderingDevice::buffer_get_data_async(RID p_buffer, const Callable &p_cal
 	return OK;
 }
 
+Error RenderingDevice::buffer_get_data_async_no_stall(RID p_buffer, const Callable &p_callback, uint32_t p_offset, uint32_t p_size) {
+	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
+	Buffer *buffer = _get_buffer_from_owner(p_buffer);
+	ERR_FAIL_NULL_V(buffer, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_size == 0 || uint64_t(p_offset) + p_size > buffer->size, ERR_INVALID_PARAMETER);
+	// The ordinary async API may grow staging or stall when staging is exhausted.
+	// Select an already safe block with enough contiguous room so its allocator
+	// takes the no-action path. This runs on the render thread, with no intervening
+	// allocation between the capacity check and the ordinary async enqueue.
+	for (int i = 0; i < download_staging_buffers.blocks.size(); i++) {
+		const StagingBufferBlock &block = download_staging_buffers.blocks[i];
+		const bool current_frame = block.frame_used == frames_drawn;
+		const bool retired = block.frame_used <= frames_drawn - frames.size();
+		if (!current_frame && !retired) {
+			continue;
+		}
+		const uint64_t offset = current_frame ? (uint64_t(block.fill_amount) + 31) & ~uint64_t(31) : 0;
+		// Strict inequality matches _staging_buffer_allocate's contiguous fast path.
+		if (offset + p_size < download_staging_buffers.block_size) {
+			download_staging_buffers.current = i;
+			return buffer_get_data_async(p_buffer, p_callback, p_offset, p_size);
+		}
+	}
+	return ERR_BUSY;
+}
+
 uint64_t RenderingDevice::buffer_get_device_address(RID p_buffer) {
 	ERR_RENDER_THREAD_GUARD_V(0);
 
@@ -7867,18 +7893,29 @@ RenderingDevice::DriverWorkarounds RenderingDevice::get_driver_workarounds() con
 
 void RenderingDevice::swap_buffers(bool p_present) {
 	ERR_RENDER_THREAD_GUARD();
+	// Opt-in lab wall-clock scopes. Finalization/driver submission happen after
+	// viewport CPU timestamps; frame recycling may wait for GPU completion and
+	// must never be reported as CPU command construction time.
+	static const bool shadow_cpu_trace = OS::get_singleton()->get_environment("ANGE_SHADOW_CPU_SUBMISSION_TRACE") == "1";
+	uint64_t trace_start = shadow_cpu_trace ? OS::get_singleton()->get_ticks_usec() : 0;
 
 	GodotProfileZoneGroupedFirst(_profile_zone, "_end_frame");
 	_end_frame();
+	uint64_t trace_finalized = shadow_cpu_trace ? OS::get_singleton()->get_ticks_usec() : 0;
 
 	GodotProfileZoneGrouped(_profile_zone, "_execute_frame");
 	_execute_frame(p_present);
+	uint64_t trace_submitted = shadow_cpu_trace ? OS::get_singleton()->get_ticks_usec() : 0;
 
 	// Advance to the next frame and begin recording again.
 	frame = (frame + 1) % frames.size();
 
 	GodotProfileZoneGrouped(_profile_zone, "_begin_frame");
 	_begin_frame(true);
+	if (shadow_cpu_trace) {
+		uint64_t trace_recycled = OS::get_singleton()->get_ticks_usec();
+		print_line(vformat("SHADOW_CPU_SUBMISSION start_us=%d finalize_us=%d submit_us=%d recycle_wait_us=%d", trace_start, trace_finalized - trace_start, trace_submitted - trace_finalized, trace_recycled - trace_submitted));
+	}
 }
 
 void RenderingDevice::submit() {

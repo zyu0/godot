@@ -164,6 +164,7 @@ public:
 
 	// Return false if the instance is to be culled.
 	bool cull_directional_light(const RendererSceneCull::InstanceBounds &p_bound, int32_t p_directional_light_id, int32_t p_cascade);
+	void get_directional_caster_planes(int32_t p_directional_light_id, int32_t p_cascade, Vector<Plane> &r_planes) const;
 
 	// Can turn on and off from the engine if desired.
 	void set_caster_culling_active(bool p_active) { data.caster_culling_active = p_active; }

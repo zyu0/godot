@@ -101,6 +101,7 @@ protected:
 
 public:
 	RSE::LightType get_light_type() const { return type; }
+	RID get_light_rid() const { return light; }
 
 	void set_editor_only(bool p_editor_only);
 	bool is_editor_only() const;
